@@ -1,0 +1,6 @@
+dist/
+rust/target/
+*.exe
+*.obj
+*.pdb
+.vscode/
