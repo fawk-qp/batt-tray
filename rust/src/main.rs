@@ -816,20 +816,25 @@ fn remove_tray() {
     let hwnd = HWND_GLOBAL.load(Ordering::Relaxed);
     if let Ok(mut st) = STATE.get().unwrap().lock() {
         unsafe {
-            for (uid, added, icon) in [
-                (UID_MOUSE, &mut st.mouse_added, &mut st.mouse_icon),
-                (UID_HEADPHONES, &mut st.hp_added, &mut st.hp_icon),
-            ] {
-                if *added {
-                    let mut nid: NotifyIconDataW = std::mem::zeroed();
-                    nid.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
-                    nid.h_wnd = hwnd;
-                    nid.u_id = uid;
-                    Shell_NotifyIconW(NIM_DELETE, &mut nid);
-                    *added = false;
-                }
-                if *icon != 0 { DestroyIcon(*icon); *icon = 0; }
+            if st.mouse_added {
+                let mut nid: NotifyIconDataW = std::mem::zeroed();
+                nid.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
+                nid.h_wnd = hwnd;
+                nid.u_id = UID_MOUSE;
+                Shell_NotifyIconW(NIM_DELETE, &mut nid);
+                st.mouse_added = false;
             }
+            if st.mouse_icon != 0 { DestroyIcon(st.mouse_icon); st.mouse_icon = 0; }
+
+            if st.hp_added {
+                let mut nid: NotifyIconDataW = std::mem::zeroed();
+                nid.cb_size = std::mem::size_of::<NotifyIconDataW>() as u32;
+                nid.h_wnd = hwnd;
+                nid.u_id = UID_HEADPHONES;
+                Shell_NotifyIconW(NIM_DELETE, &mut nid);
+                st.hp_added = false;
+            }
+            if st.hp_icon != 0 { DestroyIcon(st.hp_icon); st.hp_icon = 0; }
         }
     }
 }
