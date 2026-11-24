@@ -1,29 +1,29 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
+
 if not exist dist mkdir dist
 
-if not defined GXX set "GXX=g++"
-if not defined CARGO set "CARGO=cargo"
-
-echo [1/2] Сборка C++ версии...
-"%GXX%" -std=c++17 -O2 -s -static -municode -mwindows cpp\main.cpp -o dist\TrayBattery-cpp.exe -lsetupapi -lhid -lgdi32 -luser32 -lshell32 -ladvapi32
-if errorlevel 1 (
-    echo [ОШИБКА] C++ не собрался!
-    pause
-    exit /b 1
+where cl >nul 2>nul
+if %errorlevel%==0 (
+    echo [cpp] building windows/cpp...
+    pushd windows\cpp
+    cl /nologo /O2 /MT /EHsc /W4 device.cpp scanner.cpp icon.cpp tray.cpp main.cpp /Fe:..\..\dist\batt-tray-win-cpp.exe /Fo:%TEMP%\batt-tray-cpp-
+    popd
+) else (
+    echo [cpp] cl.exe not found, skipping C++ build
 )
 
-echo [2/2] Сборка Rust версии...
-"%CARGO%" build --manifest-path rust\Cargo.toml --release
-if errorlevel 1 (
-    echo [ОШИБКА] Rust не собрался!
-    pause
-    exit /b 1
+where cargo >nul 2>nul
+if %errorlevel%==0 (
+    echo [rust] building windows/rust...
+    pushd windows\rust
+    cargo build --release
+    copy /y target\release\batt-tray-win.exe ..\..\dist\batt-tray-win-rust.exe >nul
+    popd
+) else (
+    echo [rust] cargo not found, skipping Rust build
 )
-copy /y rust\target\release\tray-battery-rust.exe dist\TrayBattery-rust.exe >nul
 
-echo.
-echo Готово! Оба файла лежат в папке dist\:
-dir /b dist\*.exe
-pause
+echo Done. Binaries in dist\
+endlocal

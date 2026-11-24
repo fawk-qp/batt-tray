@@ -1,6 +1,7 @@
 dist/
-rust/target/
+**/target/
 *.exe
 *.obj
 *.pdb
+*.ilk
 .vscode/

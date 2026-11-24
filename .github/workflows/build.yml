@@ -1,62 +1,87 @@
-name: Build Windows EXE (C++ & Rust)
+name: Build Release Binaries
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
     tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup MSVC for C++
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build C++ EXE
+      - name: Build Windows C++
         shell: cmd
         run: |
           mkdir dist
-          cl /nologo /std:c++17 /O2 /MT /utf-8 /EHsc /DUNICODE /D_UNICODE cpp\main.cpp /Fe:dist\TrayBattery-cpp.exe /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup
+          cl /nologo /std:c++17 /O1 /Os /MT /utf-8 /EHsc /GS /guard:cf /DUNICODE /D_UNICODE ^
+            windows\cpp\*.cpp /Fe:dist\batt-tray-win-cpp.exe ^
+            user32.lib gdi32.lib shell32.lib advapi32.lib setupapi.lib hid.lib ^
+            /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /GUARD:CF /OPT:REF /OPT:ICF
 
-      - name: Setup Rust toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Rust EXE
+      - name: Build Windows Rust
         shell: pwsh
         run: |
-          cargo build --manifest-path rust\Cargo.toml --release
-          Copy-Item rust\target\release\tray-battery-rust.exe dist\TrayBattery-rust.exe
+          cargo build --manifest-path windows\rust\Cargo.toml --release
+          Copy-Item windows\rust\target\release\batt-tray-win.exe dist\batt-tray-win-rust.exe
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: TrayBattery-Windows-x64
-          path: dist/*.exe
+          name: windows-binaries
+          path: dist\batt-tray-win-*.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libdbus-1
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Build Linux C++
+        run: |
+          mkdir -p dist
+          g++ -std=c++17 -Os -fno-exceptions -fno-rtti -flto -ffunction-sections -fdata-sections \
+            -fPIE -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror \
+            linux/cpp/*.cpp -o dist/batt-tray-linux-cpp $(pkg-config --cflags --libs dbus-1) \
+            -pie -Wl,--gc-sections,-z,relro,-z,now -s
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Linux Rust
+        run: |
+          RUSTFLAGS="-C relocation-model=pie -C link-arg=-Wl,-z,relro,-z,now" \
+          cargo build --manifest-path linux/rust/Cargo.toml --release
+          cp linux/rust/target/release/batt-tray-linux dist/batt-tray-linux-rust
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist/batt-tray-linux-*
 
   release:
+    needs: [ build-windows, build-linux ]
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: windows-latest
-    permissions:
-      contents: write
+    runs-on: ubuntu-latest
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: TrayBattery-Windows-x64
-          path: dist
+          path: release-assets
+          merge-multiple: true
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/TrayBattery-cpp.exe
-            dist/TrayBattery-rust.exe
+          files: release-assets/*
