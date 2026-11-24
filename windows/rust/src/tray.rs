@@ -134,16 +134,46 @@ fn zero_nid(hwnd: HWND, uid: u32) -> NOTIFYICONDATAW {
     }
 }
 
+ffn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
 fn format_tooltip(label: &str, st: &DeviceState) -> String {
-    if !st.online || st.percent < 0 {
+    if !st.online || st.items.is_empty() {
         return format!("{}: не подключено", label);
     }
-    let ch = if st.charging { " (зарядка)" } else { "" };
-    if st.name.is_empty() {
-        format!("{}: {}%{}", label, st.percent, ch)
-    } else {
-        format!("{}: {}%{}\n{}", label, st.percent, ch, st.name)
+    if st.items.len() == 1 {
+        let d = &st.items[0];
+        let ch = if d.charging { " (зарядка)" } else { "" };
+        return if d.name.is_empty() {
+            format!("{}: {}%{}", label, d.percent, ch)
+        } else {
+            format!("{}: {}%{}\n{}", label, d.percent, ch, d.name)
+        };
     }
+
+    let name_cap = if st.items.len() >= 3 { 20 } else { 28 };
+    let mut tip = String::new();
+    for d in st.items.iter().take(4) {
+        let prefix = if d.active_audio { "\u{25B6} " } else { "\u{2022} " };
+        let title = if d.name.is_empty() { label.to_string() } else { truncate_chars(&d.name, name_cap) };
+        let ch = if d.charging { " \u{26A1}" } else { "" };
+        let line = format!("{}{}: {}%{}", prefix, title, d.percent, ch);
+        let next_utf16 = tip.encode_utf16().count() + usize::from(!tip.is_empty()) + line.encode_utf16().count();
+        if !tip.is_empty() && next_utf16 > 126 {
+            break;
+        }
+        if !tip.is_empty() {
+            tip.push('\n');
+        }
+        tip.push_str(&line);
+    }
+    tip
 }
 
 pub fn show_context_menu(hwnd: HWND) {

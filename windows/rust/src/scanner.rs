@@ -1,5 +1,7 @@
-use crate::device::{classify_device, store_candidate, DeviceState};
+use crate::device::{classify_device, finalize_devices, names_match_audio, store_candidate, DeviceEntry, DeviceKind, DeviceState};
 use crate::win32::*;
+use std::collections::HashMap;
+use std::ffi::c_void;
 use std::mem::{size_of, transmute};
 use std::ptr::{null, null_mut};
 
@@ -23,13 +25,23 @@ const PROP_DEVICE_CLASS: DEVPROPKEY = DEVPROPKEY {
     fmtid: GUID { data1: 0xA45C254E, data2: 0xDF1C, data3: 0x4EFD, data4: [0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0] },
     pid: 9,
 };
+const PROP_CONTAINER_ID: DEVPROPKEY = DEVPROPKEY {
+    fmtid: GUID { data1: 0x8C7ED206, data2: 0x3F8A, data3: 0x4827, data4: [0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C] },
+    pid: 2,
+};
+const PROP_IS_CONNECTED: DEVPROPKEY = DEVPROPKEY {
+    fmtid: GUID { data1: 0x83DA6326, data2: 0x97A6, data3: 0x4088, data4: [0x94, 0x53, 0xA1, 0x92, 0x3F, 0x57, 0x3B, 0x29] },
+    pid: 15,
+};
 
-// Standard Bluetooth LE GATT Battery Service UUID (0x180F)
+const CLSID_MM_DEVICE_ENUMERATOR: GUID = GUID {
+    data1: 0xBCDE0395, data2: 0xE52F, data3: 0x467C, data4: [0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E],
+};
+const IID_IMM_DEVICE_ENUMERATOR: GUID = GUID {
+    data1: 0xA95664D2, data2: 0x9614, data3: 0x4F35, data4: [0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6],
+};
 const GUID_BTHLE_BATTERY_SERVICE: GUID = GUID {
-    data1: 0x0000180F,
-    data2: 0x0000,
-    data3: 0x1000,
-    data4: [0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB],
+    data1: 0x0000180F, data2: 0x0000, data3: 0x1000, data4: [0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB],
 };
 
 struct DevInfoGuard(HDEVINFO);
@@ -57,6 +69,96 @@ impl Drop for ModuleGuard {
             unsafe { FreeLibrary(self.0); }
         }
     }
+}
+
+#[derive(Default)]
+struct ActiveAudioInfo {
+    container_id: String,
+    friendly_name: String,
+}
+
+fn format_guid_lower(g: &GUID) -> String {
+    if g.data1 == 0 && g.data2 == 0 && g.data3 == 0 && g.data4 == [0; 8] {
+        return String::new();
+    }
+    format!(
+        "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+        g.data1, g.data2, g.data3,
+        g.data4[0], g.data4[1], g.data4[2], g.data4[3],
+        g.data4[4], g.data4[5], g.data4[6], g.data4[7],
+    )
+}
+
+unsafe fn read_pwstr(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while len < 512 && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
+}
+
+unsafe fn query_active_audio_endpoint() -> ActiveAudioInfo {
+    let mut info = ActiveAudioInfo::default();
+    let mut enumerator: *mut IMMDeviceEnumerator = null_mut();
+    let hr = CoCreateInstance(
+        &CLSID_MM_DEVICE_ENUMERATOR,
+        null_mut(),
+        CLSCTX_INPROC_SERVER,
+        &IID_IMM_DEVICE_ENUMERATOR,
+        &mut enumerator as *mut *mut IMMDeviceEnumerator as *mut *mut c_void,
+    );
+    if hr < 0 || enumerator.is_null() {
+        return info;
+    }
+
+    let mut dev: *mut IMMDevice = null_mut();
+    let mut ghr = ((*(*enumerator).lpVtbl).GetDefaultAudioEndpoint)(enumerator, 0, 0, &mut dev);
+    if ghr < 0 || dev.is_null() {
+        ghr = ((*(*enumerator).lpVtbl).GetDefaultAudioEndpoint)(enumerator, 0, 1, &mut dev);
+    }
+
+    if ghr >= 0 && !dev.is_null() {
+        let mut store: *mut IPropertyStore = null_mut();
+        if ((*(*dev).lpVtbl).OpenPropertyStore)(dev, STGM_READ, &mut store) >= 0 && !store.is_null() {
+            let mut pv = PROPVARIANT::default();
+            if ((*(*store).lpVtbl).GetValue)(store, &PROP_CONTAINER_ID, &mut pv) >= 0 {
+                if pv.vt == VT_LPWSTR && !pv.ptr.is_null() {
+                    let cid = read_pwstr(pv.ptr as *const u16).to_lowercase();
+                    if cid != "{00000000-0000-0000-0000-000000000000}" {
+                        info.container_id = cid;
+                    }
+                } else if pv.vt == VT_CLSID && !pv.ptr.is_null() {
+                    info.container_id = format_guid_lower(&*(pv.ptr as *const GUID));
+                }
+            }
+            PropVariantClear(&mut pv);
+
+            let mut pv2 = PROPVARIANT::default();
+            if ((*(*store).lpVtbl).GetValue)(store, &PROP_FRIENDLY_NAME, &mut pv2) >= 0
+                && pv2.vt == VT_LPWSTR
+                && !pv2.ptr.is_null()
+            {
+                info.friendly_name = read_pwstr(pv2.ptr as *const u16);
+            }
+            PropVariantClear(&mut pv2);
+
+            ((*(*store).lpVtbl).Release)(store);
+        }
+        ((*(*dev).lpVtbl).Release)(dev);
+    }
+
+    ((*(*enumerator).lpVtbl).Release)(enumerator);
+    info
+}
+
+fn matches_active_audio(audio: &ActiveAudioInfo, cid: &str, name: &str) -> bool {
+    if !audio.container_id.is_empty() && !cid.is_empty() && audio.container_id == cid {
+        return true;
+    }
+    names_match_audio(name, &audio.friendly_name)
 }
 
 unsafe fn read_dev_prop_string(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEVPROPKEY) -> String {
@@ -100,6 +202,40 @@ unsafe fn read_dev_prop_byte(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEV
     }
 }
 
+// Tri-state: 1 = connected, -1 = explicitly disconnected, 0 = absent
+unsafe fn read_dev_prop_bool(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEVPROPKEY) -> i8 {
+    let mut prop_type = 0u32;
+    let mut val = 0u8;
+    let mut req = 0u32;
+    let ok = SetupDiGetDevicePropertyW(set, dev, key, &mut prop_type, &mut val, 1, &mut req, 0);
+    if ok != 0 && prop_type == DEVPROP_TYPE_BOOLEAN && req >= 1 {
+        if val != 0 { 1 } else { -1 }
+    } else {
+        0
+    }
+}
+
+unsafe fn read_dev_prop_guid(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEVPROPKEY) -> String {
+    let mut prop_type = 0u32;
+    let mut g = GUID::default();
+    let mut req = 0u32;
+    let ok = SetupDiGetDevicePropertyW(
+        set,
+        dev,
+        key,
+        &mut prop_type,
+        &mut g as *mut GUID as *mut u8,
+        size_of::<GUID>() as u32,
+        &mut req,
+        0,
+    );
+    if ok != 0 && prop_type == DEVPROP_TYPE_GUID && req >= size_of::<GUID>() as u32 {
+        format_guid_lower(&g)
+    } else {
+        String::new()
+    }
+}
+
 unsafe fn read_dev_prop_u32(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEVPROPKEY) -> u32 {
     let mut prop_type = 0u32;
     let mut val = 0u32;
@@ -130,19 +266,42 @@ unsafe fn resolve_dev_name(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA) -> String {
     }
 }
 
-unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3]) {
+unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo) {
     let set = DevInfoGuard(SetupDiGetClassDevsW(null(), null(), null_mut(), DIGCF_ALLCLASSES | DIGCF_PRESENT));
     if set.0 == INVALID_HANDLE_VALUE {
         return;
     }
 
+    struct RawCand {
+        name: String,
+        pnp_class: String,
+        container_id: String,
+        cod: u32,
+        pct: i32,
+        node_conn: i8,
+    }
+
+    let mut container_conn: HashMap<String, i8> = HashMap::new();
+    let mut raw: Vec<RawCand> = Vec::new();
     let mut idx = 0u32;
+
     loop {
         let mut dev = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
         if SetupDiEnumDeviceInfo(set.0, idx, &mut dev) == 0 {
             break;
         }
         idx += 1;
+
+        let cid = read_dev_prop_guid(set.0, &mut dev, &PROP_CONTAINER_ID);
+        let conn_state = read_dev_prop_bool(set.0, &mut dev, &PROP_IS_CONNECTED);
+        if !cid.is_empty() && conn_state != 0 {
+            let entry = container_conn.entry(cid.clone()).or_insert(0);
+            if conn_state > 0 {
+                *entry = 1;
+            } else if *entry == 0 {
+                *entry = -1;
+            }
+        }
 
         let Some(pct) = read_dev_prop_byte(set.0, &mut dev, &PROP_BLUETOOTH_BATTERY) else {
             continue;
@@ -151,18 +310,48 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3]) {
             continue;
         }
 
-        let name = resolve_dev_name(set.0, &mut dev);
-        let cls = read_dev_prop_string(set.0, &mut dev, &PROP_DEVICE_CLASS);
-        let cod = read_dev_prop_u32(set.0, &mut dev, &PROP_BLUETOOTH_COD);
-        store_candidate(out, classify_device(&name, &cls, cod), &name, pct as i32, false);
+        raw.push(RawCand {
+            name: resolve_dev_name(set.0, &mut dev),
+            pnp_class: read_dev_prop_string(set.0, &mut dev, &PROP_DEVICE_CLASS),
+            container_id: cid,
+            cod: read_dev_prop_u32(set.0, &mut dev, &PROP_BLUETOOTH_COD),
+            pct: pct as i32,
+            node_conn: conn_state,
+        });
+    }
+
+    for cand in raw {
+        let state = if !cand.container_id.is_empty() {
+            container_conn.get(&cand.container_id).copied().unwrap_or(cand.node_conn)
+        } else {
+            cand.node_conn
+        };
+        if state < 0 {
+            continue;
+        }
+
+        let is_active = matches_active_audio(audio, &cand.container_id, &cand.name);
+        let mut kind = classify_device(&cand.name, &cand.pnp_class, cand.cod);
+        if kind == DeviceKind::Unknown && is_active {
+            kind = DeviceKind::Headphones;
+        }
+
+        store_candidate(
+            out,
+            kind,
+            DeviceEntry {
+                name: cand.name,
+                container_id: cand.container_id,
+                percent: cand.pct,
+                charging: false,
+                active_audio: is_active,
+                connected: state > 0,
+            },
+        );
     }
 }
 
-unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3]) {
-    if out[0].online && out[1].online && out[2].online {
-        return;
-    }
-
+unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo) {
     let dll_name = to_wide("BluetoothAPIs.dll");
     let dll = ModuleGuard(LoadLibraryExW(dll_name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32));
     if dll.0.is_null() {
@@ -207,7 +396,6 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3]) {
             continue;
         }
 
-        // Aligned u64 backing store guarantees proper alignment for SP_DEVICE_INTERFACE_DETAIL_DATA_W
         let mut raw_detail = vec![0u64; ((req_size as usize) + 7) / 8];
         let detail_ptr = raw_detail.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
         (*detail_ptr).cbSize = detail_cb_size;
@@ -216,15 +404,16 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3]) {
         if SetupDiGetDeviceInterfaceDetailW(set.0, &mut if_data, detail_ptr, req_size, null_mut(), &mut dev) == 0 {
             continue;
         }
+        if read_dev_prop_bool(set.0, &mut dev, &PROP_IS_CONNECTED) < 0 {
+            continue;
+        }
 
-        let path_bytes = (req_size as usize) - path_offset;
-        let path_u16_len = path_bytes / 2;
+        let path_u16_len = ((req_size as usize) - path_offset) / 2;
         if path_u16_len == 0 {
             continue;
         }
         let path_ptr = (detail_ptr as *const u8).add(path_offset) as *const u16;
-        let path_slice = std::slice::from_raw_parts(path_ptr, path_u16_len);
-        let mut path_buf = path_slice.to_vec();
+        let mut path_buf = std::slice::from_raw_parts(path_ptr, path_u16_len).to_vec();
         if path_buf.last().copied() != Some(0) {
             path_buf.push(0);
         }
@@ -278,8 +467,26 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3]) {
                     if pct <= 100 {
                         let name = resolve_dev_name(set.0, &mut dev);
                         let cls = read_dev_prop_string(set.0, &mut dev, &PROP_DEVICE_CLASS);
+                        let cid = read_dev_prop_guid(set.0, &mut dev, &PROP_CONTAINER_ID);
                         let cod = read_dev_prop_u32(set.0, &mut dev, &PROP_BLUETOOTH_COD);
-                        store_candidate(out, classify_device(&name, &cls, cod), &name, pct as i32, false);
+                        let is_active = matches_active_audio(audio, &cid, &name);
+                        let mut kind = classify_device(&name, &cls, cod);
+                        if kind == DeviceKind::Unknown && is_active {
+                            kind = DeviceKind::Headphones;
+                        }
+
+                        store_candidate(
+                            out,
+                            kind,
+                            DeviceEntry {
+                                name,
+                                container_id: cid,
+                                percent: pct as i32,
+                                charging: false,
+                                active_audio: is_active,
+                                connected: true,
+                            },
+                        );
                         break;
                     }
                 }
@@ -291,8 +498,10 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3]) {
 pub fn scan_all_devices() -> [DeviceState; 3] {
     let mut out: [DeviceState; 3] = Default::default();
     unsafe {
-        scan_pnp_bluetooth(&mut out);
-        scan_ble_gatt(&mut out);
+        let audio = query_active_audio_endpoint();
+        scan_pnp_bluetooth(&mut out, &audio);
+        scan_ble_gatt(&mut out, &audio);
     }
+    finalize_devices(&mut out);
     out
 }

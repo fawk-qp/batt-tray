@@ -22,9 +22,9 @@ jobs:
         shell: cmd
         run: |
           mkdir dist
-          rc /nologo /fo windows\windows\app.res windows\windows\app.rc
+          rc /nologo /fo windows\app.res windows\app.rc
           cl /nologo /std:c++17 /O1 /Os /MT /utf-8 /EHsc /GS /guard:cf /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 ^
-            windows\cpp\*.cpp windows\windows\app.res /Fe:dist\batt-tray-win-cpp.exe ^
+            windows\cpp\*.cpp windows\app.res /Fe:dist\batt-tray-win-cpp.exe ^
             user32.lib gdi32.lib shell32.lib advapi32.lib setupapi.lib hid.lib d2d1.lib dwrite.lib windowscodecs.lib ole32.lib ^
             /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /GUARD:CF /OPT:REF /OPT:ICF /MANIFEST:NO
 
@@ -34,7 +34,7 @@ jobs:
       - name: Build Windows Rust
         shell: pwsh
         run: |
-          $env:RUSTFLAGS = "-C link-arg=$((Resolve-Path 'windows\windows\app.res').Path)"
+          $env:RUSTFLAGS = "-C link-arg=$((Resolve-Path 'windows\app.res').Path)"
           cargo build --manifest-path windows\rust\Cargo.toml --release
           Copy-Item windows\rust\target\release\batt-tray-win.exe dist\batt-tray-win-rust.exe
 

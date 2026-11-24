@@ -96,8 +96,16 @@ pub const DIGCF_DEVICEINTERFACE: u32 = 0x0000_0010;
 pub const DEVPROP_TYPE_BYTE: u32 = 0x0000_0003;
 pub const DEVPROP_TYPE_UINT32: u32 = 0x0000_0007;
 pub const DEVPROP_TYPE_STRING: u32 = 0x0000_0012;
+pub const DEVPROP_TYPE_GUID: u32 = 0x0000_000D;
+pub const DEVPROP_TYPE_BOOLEAN: u32 = 0x0000_0011;
 
 pub const BLUETOOTH_GATT_FLAG_NONE: u32 = 0x0000_0000;
+
+pub const COINIT_MULTITHREADED: u32 = 0x0;
+pub const CLSCTX_INPROC_SERVER: u32 = 0x1;
+pub const STGM_READ: u32 = 0x0;
+pub const VT_LPWSTR: u16 = 31;
+pub const VT_CLSID: u16 = 72;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -281,6 +289,60 @@ pub struct BTH_LE_GATT_CHARACTERISTIC_VALUE {
     pub Data: [u8; 1],
 }
 
+#[repr(C)]
+#[derive(Default)]
+pub struct PROPVARIANT {
+    pub vt: u16,
+    pub r1: u16,
+    pub r2: u16,
+    pub r3: u16,
+    pub ptr: *mut c_void,
+    pub pad: usize,
+}
+
+#[repr(C)]
+pub struct IPropertyStore {
+    pub lpVtbl: *const IPropertyStoreVtbl,
+}
+
+#[repr(C)]
+pub struct IPropertyStoreVtbl {
+    pub QueryInterface: *const c_void,
+    pub AddRef: *const c_void,
+    pub Release: unsafe extern "system" fn(*mut IPropertyStore) -> u32,
+    pub GetCount: *const c_void,
+    pub GetAt: *const c_void,
+    pub GetValue: unsafe extern "system" fn(*mut IPropertyStore, *const DEVPROPKEY, *mut PROPVARIANT) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IMMDevice {
+    pub lpVtbl: *const IMMDeviceVtbl,
+}
+
+#[repr(C)]
+pub struct IMMDeviceVtbl {
+    pub QueryInterface: *const c_void,
+    pub AddRef: *const c_void,
+    pub Release: unsafe extern "system" fn(*mut IMMDevice) -> u32,
+    pub Activate: *const c_void,
+    pub OpenPropertyStore: unsafe extern "system" fn(*mut IMMDevice, u32, *mut *mut IPropertyStore) -> HRESULT,
+}
+
+#[repr(C)]
+pub struct IMMDeviceEnumerator {
+    pub lpVtbl: *const IMMDeviceEnumeratorVtbl,
+}
+
+#[repr(C)]
+pub struct IMMDeviceEnumeratorVtbl {
+    pub QueryInterface: *const c_void,
+    pub AddRef: *const c_void,
+    pub Release: unsafe extern "system" fn(*mut IMMDeviceEnumerator) -> u32,
+    pub EnumAudioEndpoints: *const c_void,
+    pub GetDefaultAudioEndpoint: unsafe extern "system" fn(*mut IMMDeviceEnumerator, u32, u32, *mut *mut IMMDevice) -> HRESULT,
+}
+
 pub type FnBluetoothGattGetCharacteristics = unsafe extern "system" fn(
     HANDLE,
     *mut c_void,
@@ -389,6 +451,14 @@ extern "system" {
     pub fn CreateBitmap(nWidth: i32, nHeight: i32, nPlanes: u32, nBitCount: u32, lpBits: *const c_void) -> HBITMAP;
     pub fn GdiFlush() -> BOOL;
     pub fn EnumFontFamiliesExW(hdc: HDC, lpLogfont: *mut LOGFONTW, lpProc: FONTENUMPROCW, lParam: LPARAM, dwFlags: u32) -> i32;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    pub fn CoInitializeEx(pvReserved: *mut c_void, dwCoInit: u32) -> HRESULT;
+    pub fn CoUninitialize();
+    pub fn CoCreateInstance(rclsid: *const GUID, pUnkOuter: *mut c_void, dwClsContext: u32, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT;
+    pub fn PropVariantClear(pvar: *mut PROPVARIANT) -> HRESULT;
 }
 
 #[link(name = "shell32")]

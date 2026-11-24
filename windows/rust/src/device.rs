@@ -7,11 +7,22 @@ pub enum DeviceKind {
 }
 
 #[derive(Clone, Default)]
+pub struct DeviceEntry {
+    pub name: String,
+    pub container_id: String,
+    pub percent: i32,
+    pub charging: bool,
+    pub active_audio: bool,
+    pub connected: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct DeviceState {
     pub name: String,
     pub percent: i32,
     pub online: bool,
     pub charging: bool,
+    pub items: Vec<DeviceEntry>,
 }
 
 pub struct SlotSpec {
@@ -27,6 +38,55 @@ pub const SLOT_SPECS: [SlotSpec; 3] = [
     SlotSpec { kind: DeviceKind::Headphones, uid: 1003, label: "Наушники",   glyph: 0xE7F6 },
 ];
 
+pub fn clean_device_name(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    const SUFFIXES: [&str; 6] = [
+        "hands-free ag audio",
+        "hands-free ag",
+        "hands-free audio",
+        "hands-free",
+        "avrcp transport",
+        "stereo",
+    ];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let low = s.to_lowercase();
+        for suf in SUFFIXES {
+            if low.ends_with(suf) && s.len() >= suf.len() {
+                let cut = s.len() - suf.len();
+                if s.is_char_boundary(cut) {
+                    s.truncate(cut);
+                    s = s.trim().trim_end_matches(['-', ':', '–']).trim().to_string();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    s
+}
+
+pub fn names_match_audio(dev_name: &str, audio_endpoint_name: &str) -> bool {
+    let dev = clean_device_name(dev_name).to_lowercase();
+    let audio = clean_device_name(audio_endpoint_name).to_lowercase();
+    if dev.chars().count() < 4 || audio.chars().count() < 4 {
+        return false;
+    }
+    if audio.contains(&dev) || dev.contains(&audio) {
+        return true;
+    }
+    if let (Some(open), Some(close)) = (audio.find('('), audio.rfind(')')) {
+        if close > open + 1 {
+            let inner = clean_device_name(&audio[open + 1..close]).to_lowercase();
+            if inner.chars().count() >= 4 && (dev.contains(&inner) || inner.contains(&dev)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn classify_device(name: &str, pnp_class: &str, cod: u32) -> DeviceKind {
     let low = name.to_lowercase();
     for skip in ["gamepad", "controller", "xbox", "dualsense", "dualshock", "joystick", "joy-con"] {
@@ -35,7 +95,6 @@ pub fn classify_device(name: &str, pnp_class: &str, cod: u32) -> DeviceKind {
         }
     }
 
-    // Bluetooth Class of Device: Major 0x04 = Audio, 0x05 = Peripheral (0x80 mouse, 0x40 keyboard)
     if cod != 0 {
         let major = (cod >> 8) & 0x1F;
         if major == 0x04 {
@@ -96,15 +155,45 @@ pub fn classify_device(name: &str, pnp_class: &str, cod: u32) -> DeviceKind {
     DeviceKind::Unknown
 }
 
-pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, name: &str, percent: i32, charging: bool) {
-    if kind == DeviceKind::Unknown || !(0..=100).contains(&percent) {
+pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, mut entry: DeviceEntry) {
+    if kind == DeviceKind::Unknown || !(0..=100).contains(&entry.percent) {
         return;
     }
-    let dst = &mut out[kind as usize];
-    if !dst.online {
-        dst.name = name.trim().to_string();
-        dst.percent = percent;
-        dst.online = true;
-        dst.charging = charging;
+    entry.name = clean_device_name(&entry.name);
+    let norm = entry.name.to_lowercase();
+
+    let items = &mut out[kind as usize].items;
+    for existing in items.iter_mut() {
+        let same_cid = !entry.container_id.is_empty() && entry.container_id == existing.container_id;
+        let same_name = !norm.is_empty() && norm == existing.name.to_lowercase();
+        if same_cid || same_name {
+            existing.active_audio |= entry.active_audio;
+            existing.connected |= entry.connected;
+            existing.charging |= entry.charging;
+            if existing.name.is_empty() && !entry.name.is_empty() {
+                existing.name = entry.name;
+            }
+            return;
+        }
+    }
+    items.push(entry);
+}
+
+pub fn finalize_devices(out: &mut [DeviceState; 3]) {
+    for slot in out.iter_mut() {
+        if slot.items.is_empty() {
+            slot.online = false;
+            slot.percent = -1;
+            slot.charging = false;
+            slot.name.clear();
+            continue;
+        }
+        slot.items.sort_by(|a, b| {
+            b.active_audio.cmp(&a.active_audio).then(b.connected.cmp(&a.connected))
+        });
+        slot.online = true;
+        slot.name = slot.items[0].name.clone();
+        slot.percent = slot.items[0].percent;
+        slot.charging = slot.items[0].charging;
     }
 }

@@ -3,8 +3,11 @@
 #include "tray.hpp"
 
 #include <dbt.h>
+#include <mmdeviceapi.h>
 #include <objbase.h>
 
+#include <atomic>
+#include <cstring>
 #include <cwchar>
 #include <mutex>
 #include <thread>
@@ -14,6 +17,71 @@ namespace {
 constexpr UINT_PTR kTimerDebounce = 1;
 constexpr UINT kDebounceMs = 2000;
 constexpr DWORD kPollIntervalMs = 60000;
+
+constexpr GUID kClsidMMDeviceEnumerator = {
+    0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}
+};
+constexpr GUID kIidIMMDeviceEnumerator = {
+    0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}
+};
+constexpr GUID kIidIMMNotificationClient = {
+    0x7991EEC9, 0x7E89, 0x4D85, {0x83, 0x90, 0x6C, 0x70, 0x3C, 0xEC, 0x60, 0xC0}
+};
+constexpr GUID kIidIUnknown = {
+    0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
+};
+
+class AudioChangeClient final : public IMMNotificationClient {
+public:
+    explicit AudioChangeClient(HANDLE scanEvent) : scanEvent_(scanEvent) {}
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++ref_;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG n = --ref_;
+        if (n == 0) delete this;
+        return n;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (std::memcmp(&riid, &kIidIUnknown, sizeof(GUID)) == 0 ||
+            std::memcmp(&riid, &kIidIMMNotificationClient, sizeof(GUID)) == 0) {
+            *ppv = static_cast<IMMNotificationClient*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR) override {
+        if (flow == eRender && (role == eConsole || role == eMultimedia)) Trigger();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override {
+        Trigger();
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+
+    void Detach() { scanEvent_.store(nullptr, std::memory_order_release); }
+
+private:
+    void Trigger() {
+        HANDLE ev = scanEvent_.load(std::memory_order_acquire);
+        if (ev) SetEvent(ev);
+    }
+
+    std::atomic<ULONG> ref_{1};
+    std::atomic<HANDLE> scanEvent_{nullptr};
+};
 
 struct AppContext {
     TrayManager tray;
@@ -28,6 +96,20 @@ struct AppContext {
 AppContext* g_app = nullptr;
 
 void WorkerLoop(HWND hwnd, AppContext* app) {
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+    IMMDeviceEnumerator* audioEnum = nullptr;
+    AudioChangeClient* audioClient = nullptr;
+    if (SUCCEEDED(comHr) &&
+        SUCCEEDED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
+            kIidIMMDeviceEnumerator, reinterpret_cast<void**>(&audioEnum))) && audioEnum) {
+        audioClient = new AudioChangeClient(app->scanEvent);
+        if (FAILED(audioEnum->RegisterEndpointNotificationCallback(audioClient))) {
+            audioClient->Release();
+            audioClient = nullptr;
+        }
+    }
+
     HANDLE waits[2] = {app->stopEvent, app->scanEvent};
     for (;;) {
         auto result = ScanAllDevices();
@@ -40,6 +122,16 @@ void WorkerLoop(HWND hwnd, AppContext* app) {
         const DWORD rc = WaitForMultipleObjects(2, waits, FALSE, kPollIntervalMs);
         if (rc == WAIT_OBJECT_0 || rc == WAIT_FAILED) break;
     }
+
+    if (audioEnum) {
+        if (audioClient) {
+            audioClient->Detach();
+            audioEnum->UnregisterEndpointNotificationCallback(audioClient);
+            audioClient->Release();
+        }
+        audioEnum->Release();
+    }
+    if (SUCCEEDED(comHr)) CoUninitialize();
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

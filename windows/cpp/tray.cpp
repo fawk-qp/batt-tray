@@ -11,13 +11,39 @@ namespace {
 constexpr const wchar_t* kRunSubkey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr const wchar_t* kRunValue = L"BattTray";
 
+std::wstring TruncateName(const std::wstring& s, size_t maxLen) {
+    if (s.size() <= maxLen) return s;
+    return s.substr(0, maxLen - 1) + L"\u2026";
+}
+
 std::wstring FormatTooltip(const SlotSpec& spec, const DeviceState& st) {
-    if (!st.online || st.percent < 0) {
+    if (!st.online || st.items.empty()) {
         return std::wstring(spec.label) + L": не подключено";
     }
-    std::wstring tip = std::wstring(spec.label) + L": " + std::to_wstring(st.percent) + L"%";
-    if (st.charging) tip += L" (зарядка)";
-    if (!st.name.empty()) tip += L"\n" + st.name;
+    if (st.items.size() == 1) {
+        const auto& d = st.items[0];
+        std::wstring tip = std::wstring(spec.label) + L": " + std::to_wstring(d.percent) + L"%";
+        if (d.charging) tip += L" (зарядка)";
+        if (!d.name.empty()) tip += L"\n" + d.name;
+        return tip;
+    }
+
+    // Multiple connected devices: active audio endpoint first (marked with ▶), fit within 127 chars
+    std::wstring tip;
+    const size_t maxLines = 4;
+    const size_t nameCap = (st.items.size() >= 3) ? 20u : 28u;
+    for (size_t i = 0; i < st.items.size() && i < maxLines; ++i) {
+        const auto& d = st.items[i];
+        std::wstring label = d.name.empty() ? std::wstring(spec.label) : TruncateName(d.name, nameCap);
+        std::wstring line = (d.activeAudio ? L"\u25B6 " : L"\u2022 ") + label +
+                            L": " + std::to_wstring(d.percent) + L"%" +
+                            (d.charging ? L" \u26A1" : L"");
+        if (!tip.empty()) {
+            if (tip.size() + 1 + line.size() > 126) break;
+            tip += L"\n";
+        }
+        tip += line;
+    }
     return tip;
 }
 

@@ -2,6 +2,9 @@
 
 #include <bluetoothleapis.h>
 #include <devpropdef.h>
+#include <mmdeviceapi.h>
+#include <objbase.h>
+#include <propsys.h>
 #include <setupapi.h>
 
 extern "C" {
@@ -12,6 +15,7 @@ extern "C" {
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -31,8 +35,26 @@ constexpr DEVPROPKEY kPropDeviceDesc = {
 constexpr DEVPROPKEY kPropDeviceClass = {
     {0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 9
 };
+constexpr DEVPROPKEY kPropContainerId = {
+    {0x8C7ED206, 0x3F8A, 0x4827, {0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C}}, 2
+};
+constexpr DEVPROPKEY kPropIsConnected = {
+    {0x83DA6326, 0x97A6, 0x4088, {0x94, 0x53, 0xA1, 0x92, 0x3F, 0x57, 0x3B, 0x29}}, 15
+};
 
-// Standard Bluetooth LE GATT Battery Service UUID (0x180F)
+constexpr PROPERTYKEY kPkeyAudioContainerId = {
+    {0x8C7ED206, 0x3F8A, 0x4827, {0xB3, 0xAB, 0xAE, 0x9E, 0x1F, 0xAE, 0xFC, 0x6C}}, 2
+};
+constexpr PROPERTYKEY kPkeyAudioFriendlyName = {
+    {0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14
+};
+
+constexpr GUID kClsidMMDeviceEnumerator = {
+    0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}
+};
+constexpr GUID kIidIMMDeviceEnumerator = {
+    0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}
+};
 constexpr GUID kGuidBthLeBatteryService = {
     0x0000180F, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}
 };
@@ -69,8 +91,69 @@ struct HidPreparsedGuard {
     HidPreparsedGuard& operator=(const HidPreparsedGuard&) = delete;
 };
 
-bool AllOnline(const std::array<DeviceState, 3>& out) {
-    return out[0].online && out[1].online && out[2].online;
+struct ActiveAudioInfo {
+    std::wstring containerId;
+    std::wstring friendlyName;
+};
+
+bool IsZeroGuid(const GUID& g) {
+    static constexpr GUID kZero{};
+    return std::memcmp(&g, &kZero, sizeof(GUID)) == 0;
+}
+
+std::wstring FormatGuidLower(const GUID& g) {
+    if (IsZeroGuid(g)) return {};
+    wchar_t buf[64]{};
+    if (StringFromGUID2(g, buf, _countof(buf)) <= 0) return {};
+    return ToLower(buf);
+}
+
+ActiveAudioInfo QueryActiveAudioEndpoint() {
+    ActiveAudioInfo info{};
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (FAILED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
+            kIidIMMDeviceEnumerator, reinterpret_cast<void**>(&enumerator))) || !enumerator) {
+        return info;
+    }
+
+    IMMDevice* dev = nullptr;
+    HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
+    if (FAILED(hr) || !dev) {
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &dev);
+    }
+
+    if (SUCCEEDED(hr) && dev) {
+        IPropertyStore* store = nullptr;
+        if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &store)) && store) {
+            PROPVARIANT pv;
+            PropVariantInit(&pv);
+            if (SUCCEEDED(store->GetValue(kPkeyAudioContainerId, &pv))) {
+                if (pv.vt == VT_LPWSTR && pv.pwszVal) {
+                    std::wstring cid = ToLower(pv.pwszVal);
+                    if (cid != L"{00000000-0000-0000-0000-000000000000}") info.containerId = std::move(cid);
+                } else if (pv.vt == VT_CLSID && pv.puuid) {
+                    info.containerId = FormatGuidLower(*pv.puuid);
+                }
+            }
+            PropVariantClear(&pv);
+
+            PropVariantInit(&pv);
+            if (SUCCEEDED(store->GetValue(kPkeyAudioFriendlyName, &pv))) {
+                if (pv.vt == VT_LPWSTR && pv.pwszVal) info.friendlyName = pv.pwszVal;
+            }
+            PropVariantClear(&pv);
+            store->Release();
+        }
+        dev->Release();
+    }
+
+    enumerator->Release();
+    return info;
+}
+
+bool MatchesActiveAudio(const ActiveAudioInfo& audio, const std::wstring& cid, const std::wstring& name) {
+    if (!audio.containerId.empty() && !cid.empty() && audio.containerId == cid) return true;
+    return NamesMatchAudio(name, audio.friendlyName);
 }
 
 std::wstring ReadDevPropString(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key) {
@@ -98,6 +181,31 @@ bool ReadDevPropByte(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key, 
     return true;
 }
 
+// Tri-state: 1 = connected, -1 = explicitly disconnected, 0 = property absent
+int ReadDevPropBool(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key) {
+    DEVPROPTYPE type = 0;
+    DEVPROP_BOOLEAN val = 0;
+    DWORD req = 0;
+    if (!SetupDiGetDevicePropertyW(set, &dev, &key, &type,
+            reinterpret_cast<PBYTE>(&val), sizeof(val), &req, 0)) {
+        return 0;
+    }
+    if (type != DEVPROP_TYPE_BOOLEAN || req < 1) return 0;
+    return (val != 0) ? 1 : -1;
+}
+
+std::wstring ReadDevPropGuid(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key) {
+    DEVPROPTYPE type = 0;
+    GUID g{};
+    DWORD req = 0;
+    if (!SetupDiGetDevicePropertyW(set, &dev, &key, &type,
+            reinterpret_cast<PBYTE>(&g), sizeof(g), &req, 0)) {
+        return {};
+    }
+    if (type != DEVPROP_TYPE_GUID || req < sizeof(GUID)) return {};
+    return FormatGuidLower(g);
+}
+
 uint32_t ReadDevPropU32(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key) {
     DEVPROPTYPE type = 0;
     uint32_t val = 0;
@@ -115,29 +223,74 @@ std::wstring ResolveDevName(HDEVINFO set, SP_DEVINFO_DATA& dev) {
     return name;
 }
 
-void ScanPnpBluetooth(std::array<DeviceState, 3>& out) {
+void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& audio) {
     DevInfoGuard set(SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT));
     if (set.set == INVALID_HANDLE_VALUE) return;
+
+    struct RawCandidate {
+        std::wstring name;
+        std::wstring pnpClass;
+        std::wstring containerId;
+        uint32_t cod = 0;
+        int pct = -1;
+        int nodeConn = 0;
+    };
+
+    // Single pass: collect per-container Bluetooth connection state alongside battery nodes
+    std::unordered_map<std::wstring, int> containerConn;
+    std::vector<RawCandidate> raw;
 
     SP_DEVINFO_DATA dev{};
     dev.cbSize = sizeof(dev);
     for (DWORD i = 0; SetupDiEnumDeviceInfo(set.set, i, &dev); ++i) {
+        const std::wstring cid = ReadDevPropGuid(set.set, dev, kPropContainerId);
+        const int connState = ReadDevPropBool(set.set, dev, kPropIsConnected);
+        if (!cid.empty() && connState != 0) {
+            auto& slot = containerConn[cid];
+            if (connState > 0) slot = 1;
+            else if (slot == 0) slot = -1;
+        }
+
         uint8_t pct = 0;
         if (!ReadDevPropByte(set.set, dev, kPropBluetoothBattery, pct) || pct > 100) continue;
 
-        const std::wstring name = ResolveDevName(set.set, dev);
-        const std::wstring cls = ReadDevPropString(set.set, dev, kPropDeviceClass);
-        const uint32_t cod = ReadDevPropU32(set.set, dev, kPropBluetoothCoD);
-        StoreCandidate(out, ClassifyDevice(name, cls, cod), name, pct);
+        RawCandidate cand{};
+        cand.name = ResolveDevName(set.set, dev);
+        cand.pnpClass = ReadDevPropString(set.set, dev, kPropDeviceClass);
+        cand.containerId = cid;
+        cand.cod = ReadDevPropU32(set.set, dev, kPropBluetoothCoD);
+        cand.pct = pct;
+        cand.nodeConn = connState;
+        raw.push_back(std::move(cand));
+    }
+
+    for (const auto& cand : raw) {
+        int state = cand.nodeConn;
+        if (!cand.containerId.empty()) {
+            const auto it = containerConn.find(cand.containerId);
+            if (it != containerConn.end()) state = it->second;
+        }
+        // Skip paired Bluetooth devices explicitly reported as disconnected (stale cached battery)
+        if (state < 0) continue;
+
+        const bool isActive = MatchesActiveAudio(audio, cand.containerId, cand.name);
+        DeviceKind kind = ClassifyDevice(cand.name, cand.pnpClass, cand.cod);
+        if (kind == DeviceKind::Unknown && isActive) kind = DeviceKind::Headphones;
+
+        DeviceEntry entry{};
+        entry.name = cand.name;
+        entry.containerId = cand.containerId;
+        entry.percent = cand.pct;
+        entry.activeAudio = isActive;
+        entry.connected = (state > 0);
+        StoreCandidate(out, kind, entry);
     }
 }
 
 using FnGetChars = HRESULT (WINAPI*)(HANDLE, PBTH_LE_GATT_SERVICE, USHORT, PBTH_LE_GATT_CHARACTERISTIC, USHORT*, ULONG);
 using FnGetCharVal = HRESULT (WINAPI*)(HANDLE, PBTH_LE_GATT_CHARACTERISTIC, ULONG, PBTH_LE_GATT_CHARACTERISTIC_VALUE, USHORT*, ULONG);
 
-void ScanBleGatt(std::array<DeviceState, 3>& out) {
-    if (AllOnline(out)) return;
-
+void ScanBleGatt(std::array<DeviceState, 3>& out, const ActiveAudioInfo& audio) {
     ModuleGuard dll(LoadLibraryExW(L"BluetoothAPIs.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     if (!dll.mod) return;
 
@@ -163,6 +316,8 @@ void ScanBleGatt(std::array<DeviceState, 3>& out) {
         SP_DEVINFO_DATA dev{};
         dev.cbSize = sizeof(dev);
         if (!SetupDiGetDeviceInterfaceDetailW(set.set, &ifData, detail, reqSize, nullptr, &dev)) continue;
+
+        if (ReadDevPropBool(set.set, dev, kPropIsConnected) < 0) continue;
 
         HandleGuard h(CreateFileW(detail->DevicePath, GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -194,8 +349,19 @@ void ScanBleGatt(std::array<DeviceState, 3>& out) {
                 if (val->DataSize >= 1 && val->DataSize <= maxPayload && val->Data[0] <= 100) {
                     const std::wstring name = ResolveDevName(set.set, dev);
                     const std::wstring cls = ReadDevPropString(set.set, dev, kPropDeviceClass);
+                    const std::wstring cid = ReadDevPropGuid(set.set, dev, kPropContainerId);
                     const uint32_t cod = ReadDevPropU32(set.set, dev, kPropBluetoothCoD);
-                    StoreCandidate(out, ClassifyDevice(name, cls, cod), name, val->Data[0]);
+                    const bool isActive = MatchesActiveAudio(audio, cid, name);
+                    DeviceKind kind = ClassifyDevice(name, cls, cod);
+                    if (kind == DeviceKind::Unknown && isActive) kind = DeviceKind::Headphones;
+
+                    DeviceEntry entry{};
+                    entry.name = name;
+                    entry.containerId = cid;
+                    entry.percent = val->Data[0];
+                    entry.activeAudio = isActive;
+                    entry.connected = true;
+                    StoreCandidate(out, kind, entry);
                     break;
                 }
             }
@@ -203,9 +369,7 @@ void ScanBleGatt(std::array<DeviceState, 3>& out) {
     }
 }
 
-void ScanUsbHidPower(std::array<DeviceState, 3>& out) {
-    if (AllOnline(out)) return;
-
+void ScanUsbHidPower(std::array<DeviceState, 3>& out, const ActiveAudioInfo& audio) {
     GUID hidGuid{};
     HidD_GetHidGuid(&hidGuid);
     DevInfoGuard set(SetupDiGetClassDevsW(&hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE));
@@ -226,7 +390,6 @@ void ScanUsbHidPower(std::array<DeviceState, 3>& out) {
         dev.cbSize = sizeof(dev);
         if (!SetupDiGetDeviceInterfaceDetailW(set.set, &ifData, detail, reqSize, nullptr, &dev)) continue;
 
-        // Access mode 0 allows querying feature reports even on mice/keyboards locked by Windows
         HandleGuard h(CreateFileW(detail->DevicePath, 0,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr));
         if (h.h == INVALID_HANDLE_VALUE) continue;
@@ -247,7 +410,6 @@ void ScanUsbHidPower(std::array<DeviceState, 3>& out) {
         for (USHORT c = 0; c < capCount; ++c) {
             const auto& vc = valueCaps[c];
             if (vc.IsRange) continue;
-            // HID Power Device (0x84) / Battery System (0x85): RemainingCapacity (0x66) or AbsoluteStateOfCharge (0x65)
             const bool isPowerPage = (vc.UsagePage == 0x84 || vc.UsagePage == 0x85);
             const bool isBatUsage = (vc.NotRange.Usage == 0x66 || vc.NotRange.Usage == 0x65);
             if (!isPowerPage || !isBatUsage) continue;
@@ -281,7 +443,18 @@ void ScanUsbHidPower(std::array<DeviceState, 3>& out) {
             }
             if (name.empty()) name = ResolveDevName(set.set, dev);
             const std::wstring cls = ReadDevPropString(set.set, dev, kPropDeviceClass);
-            StoreCandidate(out, ClassifyDevice(name, cls), name, pct);
+            const std::wstring cid = ReadDevPropGuid(set.set, dev, kPropContainerId);
+            const bool isActive = MatchesActiveAudio(audio, cid, name);
+            DeviceKind kind = ClassifyDevice(name, cls);
+            if (kind == DeviceKind::Unknown && isActive) kind = DeviceKind::Headphones;
+
+            DeviceEntry entry{};
+            entry.name = name;
+            entry.containerId = cid;
+            entry.percent = pct;
+            entry.activeAudio = isActive;
+            entry.connected = true;
+            StoreCandidate(out, kind, entry);
             break;
         }
     }
@@ -291,8 +464,10 @@ void ScanUsbHidPower(std::array<DeviceState, 3>& out) {
 
 std::array<DeviceState, 3> ScanAllDevices() {
     std::array<DeviceState, 3> out{};
-    ScanPnpBluetooth(out);
-    ScanBleGatt(out);
-    ScanUsbHidPower(out);
+    const ActiveAudioInfo audio = QueryActiveAudioEndpoint();
+    ScanPnpBluetooth(out, audio);
+    ScanBleGatt(out, audio);
+    ScanUsbHidPower(out, audio);
+    FinalizeDevices(out);
     return out;
 }

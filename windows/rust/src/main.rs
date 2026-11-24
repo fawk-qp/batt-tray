@@ -37,6 +37,7 @@ thread_local! {
 }
 
 fn worker_loop(hwnd: SendPtr, stop: SendPtr, scan: SendPtr, pending: Arc<Mutex<[DeviceState; 3]>>) {
+    let com_hr = unsafe { CoInitializeEx(null_mut(), COINIT_MULTITHREADED) };
     let waits = [stop.0, scan.0];
     loop {
         let res = scanner::scan_all_devices();
@@ -50,6 +51,9 @@ fn worker_loop(hwnd: SendPtr, stop: SendPtr, scan: SendPtr, pending: Arc<Mutex<[
                 break;
             }
         }
+    }
+    if com_hr >= 0 {
+        unsafe { CoUninitialize() };
     }
 }
 

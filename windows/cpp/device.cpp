@@ -1,5 +1,6 @@
 #include "device.hpp"
 
+#include <algorithm>
 #include <cwctype>
 #include <initializer_list>
 
@@ -10,6 +11,20 @@ bool ContainsAny(const std::wstring& hay, std::initializer_list<const wchar_t*> 
         if (hay.find(n) != std::wstring::npos) return true;
     }
     return false;
+}
+
+bool StripSuffixI(std::wstring& s, const wchar_t* suffix) {
+    const std::wstring low = ToLower(s);
+    const std::wstring suf = ToLower(suffix);
+    if (low.size() < suf.size()) return false;
+    if (low.compare(low.size() - suf.size(), suf.size(), suf) != 0) return false;
+    s.erase(s.size() - suf.size());
+    s = Trim(std::move(s));
+    while (!s.empty() && (s.back() == L'-' || s.back() == L':' || s.back() == L'–')) {
+        s.pop_back();
+        s = Trim(std::move(s));
+    }
+    return true;
 }
 
 } // namespace
@@ -35,6 +50,44 @@ std::wstring Trim(std::wstring s) {
     size_t i = 0;
     while (i < s.size() && std::iswspace(s[i])) ++i;
     return s.substr(i);
+}
+
+std::wstring CleanDeviceName(std::wstring s) {
+    s = Trim(std::move(s));
+    static constexpr const wchar_t* kSuffixes[] = {
+        L"hands-free ag audio",
+        L"hands-free ag",
+        L"hands-free audio",
+        L"hands-free",
+        L"avrcp transport",
+        L"stereo",
+    };
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const wchar_t* suf : kSuffixes) {
+            if (StripSuffixI(s, suf)) changed = true;
+        }
+    }
+    return s;
+}
+
+bool NamesMatchAudio(const std::wstring& devName, const std::wstring& audioEndpointName) {
+    const std::wstring dev = ToLower(CleanDeviceName(devName));
+    const std::wstring audio = ToLower(CleanDeviceName(audioEndpointName));
+    if (dev.size() < 4 || audio.size() < 4) return false;
+    if (audio.find(dev) != std::wstring::npos || dev.find(audio) != std::wstring::npos) return true;
+
+    // Audio endpoints are typically formatted as "Headphones (Model Name)"
+    const size_t open = audio.find(L'(');
+    const size_t close = audio.rfind(L')');
+    if (open != std::wstring::npos && close != std::wstring::npos && close > open + 4) {
+        const std::wstring inner = ToLower(CleanDeviceName(audio.substr(open + 1, close - open - 1)));
+        if (inner.size() >= 4 && (dev.find(inner) != std::wstring::npos || inner.find(dev) != std::wstring::npos)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 DeviceKind ClassifyDevice(const std::wstring& name, const std::wstring& pnpClass, uint32_t cod) {
@@ -83,13 +136,45 @@ DeviceKind ClassifyDevice(const std::wstring& name, const std::wstring& pnpClass
     return DeviceKind::Unknown;
 }
 
-void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const std::wstring& name, int percent, bool charging) {
-    if (kind == DeviceKind::Unknown || percent < 0 || percent > 100) return;
-    auto& dst = out[static_cast<size_t>(kind)];
-    if (!dst.online) {
-        dst.name = Trim(name);
-        dst.percent = percent;
-        dst.online = true;
-        dst.charging = charging;
+void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const DeviceEntry& entry) {
+    if (kind == DeviceKind::Unknown || entry.percent < 0 || entry.percent > 100) return;
+
+    DeviceEntry clean = entry;
+    clean.name = CleanDeviceName(clean.name);
+    const std::wstring normName = ToLower(clean.name);
+
+    auto& items = out[static_cast<size_t>(kind)].items;
+    for (auto& existing : items) {
+        const bool sameCid = !clean.containerId.empty() && clean.containerId == existing.containerId;
+        const bool sameName = !normName.empty() && normName == ToLower(existing.name);
+        if (sameCid || sameName) {
+            if (clean.activeAudio) existing.activeAudio = true;
+            if (clean.connected) existing.connected = true;
+            if (clean.charging) existing.charging = true;
+            if (existing.name.empty() && !clean.name.empty()) existing.name = clean.name;
+            return;
+        }
+    }
+    items.push_back(std::move(clean));
+}
+
+void FinalizeDevices(std::array<DeviceState, 3>& out) {
+    for (auto& slot : out) {
+        if (slot.items.empty()) {
+            slot.online = false;
+            slot.percent = -1;
+            slot.charging = false;
+            slot.name.clear();
+            continue;
+        }
+        std::stable_sort(slot.items.begin(), slot.items.end(), [](const DeviceEntry& a, const DeviceEntry& b) {
+            if (a.activeAudio != b.activeAudio) return a.activeAudio > b.activeAudio;
+            if (a.connected != b.connected) return a.connected > b.connected;
+            return false;
+        });
+        slot.online = true;
+        slot.name = slot.items.front().name;
+        slot.percent = slot.items.front().percent;
+        slot.charging = slot.items.front().charging;
     }
 }
