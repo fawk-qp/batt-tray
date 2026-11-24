@@ -1,10 +1,62 @@
 #include "icon.hpp"
 
+#include <d2d1.h>
+#include <dwrite.h>
+#include <objbase.h>
+#include <wincodec.h>
+
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
-#include <cstring>
+#include <vector>
 
 namespace {
+
+template <typename T>
+struct ComPtr {
+    T* p = nullptr;
+    ComPtr() = default;
+    ~ComPtr() { Reset(); }
+    ComPtr(const ComPtr&) = delete;
+    ComPtr& operator=(const ComPtr&) = delete;
+    void Reset() {
+        if (p) {
+            p->Release();
+            p = nullptr;
+        }
+    }
+    T* get() const { return p; }
+    T* operator->() const { return p; }
+    T** put() { Reset(); return &p; }
+    explicit operator bool() const { return p != nullptr; }
+};
+
+struct D2DFactories {
+    ComPtr<ID2D1Factory> d2d;
+    ComPtr<IDWriteFactory> dwrite;
+    ComPtr<IWICImagingFactory> wic;
+    bool initialized = false;
+
+    bool Ensure() {
+        if (initialized) return d2d && dwrite && wic;
+        initialized = true;
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.put()))) return false;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                reinterpret_cast<IUnknown**>(dwrite.put())))) return false;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                __uuidof(IWICImagingFactory), reinterpret_cast<void**>(wic.put())))) return false;
+        return true;
+    }
+
+    void Reset() {
+        wic.Reset();
+        dwrite.Reset();
+        d2d.Reset();
+        initialized = false;
+    }
+};
+
+D2DFactories g_fx;
 
 int CALLBACK FontEnumProc(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM lParam) {
     *reinterpret_cast<bool*>(lParam) = true;
@@ -28,11 +80,15 @@ const wchar_t* PickIconFontName() {
     return cached;
 }
 
-inline void WritePremulBgra(uint8_t* px, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-    px[0] = static_cast<uint8_t>((static_cast<unsigned>(b) * a + 127u) / 255u);
-    px[1] = static_cast<uint8_t>((static_cast<unsigned>(g) * a + 127u) / 255u);
-    px[2] = static_cast<uint8_t>((static_cast<unsigned>(r) * a + 127u) / 255u);
-    px[3] = a;
+int GetTaskbarIconSize() {
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    UINT dpi = taskbar ? GetDpiForWindow(taskbar) : GetDpiForSystem();
+    if (dpi == 0) dpi = 96u;
+    return std::clamp(GetSystemMetricsForDpi(SM_CXSMICON, dpi), 16, 64);
+}
+
+inline D2D1_COLOR_F Rgba(uint8_t r, uint8_t g, uint8_t b, float a = 1.0f) {
+    return D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, a);
 }
 
 } // namespace
@@ -51,14 +107,112 @@ bool IsTaskbarLightTheme() {
     return (rc == ERROR_SUCCESS && val != 0);
 }
 
+void ShutdownIconRenderer() {
+    g_fx.Reset();
+}
+
 HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightTheme) {
-    const int size = std::clamp(GetSystemMetrics(SM_CXSMICON), 16, 64);
+    if (!g_fx.Ensure()) return nullptr;
+
+    const int size = GetTaskbarIconSize();
+    const float fSize = static_cast<float>(size);
+    const float scale = fSize / 16.0f;
+
+    ComPtr<IWICBitmap> wicBmp;
+    if (FAILED(g_fx.wic->CreateBitmap(static_cast<UINT>(size), static_cast<UINT>(size),
+            GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, wicBmp.put()))) {
+        return nullptr;
+    }
+
+    const D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+
+    ComPtr<ID2D1RenderTarget> rt;
+    if (FAILED(g_fx.d2d->CreateWicBitmapRenderTarget(wicBmp.get(), rtProps, rt.put()))) {
+        return nullptr;
+    }
+
+    rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+    // Proportions aligned to the Windows 11 16-DIP tray icon grid
+    const float barH = std::max(2.0f, std::round(2.0f * scale));
+    const float bottomPad = (size >= 24) ? 1.0f : 0.0f;
+    const float gap = std::max(1.0f, std::round(1.0f * scale));
+    const float padX = std::max(1.0f, std::round(1.0f * scale));
+    const float barY = fSize - bottomPad - barH;
+    const float glyphBoxH = std::max(10.0f, barY - gap);
+    const float fontPx = std::round(12.2f * scale);
+
+    ComPtr<IDWriteTextFormat> fmt;
+    if (FAILED(g_fx.dwrite->CreateTextFormat(
+            PickIconFontName(), nullptr,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+            fontPx, L"", fmt.put()))) {
+        return nullptr;
+    }
+    fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+    wchar_t text[2] = {glyph, L'\0'};
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(g_fx.dwrite->CreateTextLayout(text, 1, fmt.get(), fSize, glyphBoxH, layout.put()))) {
+        return nullptr;
+    }
+
+    // Windows 11 Fluent icon colors
+    const float glyphAlpha = state.online ? (lightTheme ? 0.92f : 1.0f) : 0.42f;
+    const D2D1_COLOR_F glyphCol = lightTheme ? Rgba(0x1A, 0x1A, 0x1A, glyphAlpha)
+                                             : Rgba(0xFF, 0xFF, 0xFF, glyphAlpha);
+
+    ComPtr<ID2D1SolidColorBrush> glyphBrush;
+    if (FAILED(rt->CreateSolidColorBrush(glyphCol, glyphBrush.put()))) return nullptr;
+
+    rt->BeginDraw();
+    rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    rt->DrawTextLayout(D2D1::Point2F(0.0f, 0.0f), layout.get(), glyphBrush.get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+
+    if (state.online && state.percent >= 0) {
+        const float barW = std::max(4.0f, fSize - 2.0f * padX);
+        const float radius = barH * 0.5f;
+
+        const D2D1_COLOR_F trackCol = lightTheme ? Rgba(0x00, 0x00, 0x00, 0.18f)
+                                                 : Rgba(0xFF, 0xFF, 0xFF, 0.24f);
+        ComPtr<ID2D1SolidColorBrush> trackBrush;
+        if (SUCCEEDED(rt->CreateSolidColorBrush(trackCol, trackBrush.put()))) {
+            const D2D1_ROUNDED_RECT track = D2D1::RoundedRect(
+                D2D1::RectF(padX, barY, padX + barW, barY + barH), radius, radius);
+            rt->FillRoundedRectangle(track, trackBrush.get());
+        }
+
+        if (state.percent > 0) {
+            D2D1_COLOR_F fillCol{};
+            if (state.charging) {
+                fillCol = lightTheme ? Rgba(0x00, 0x5F, 0xB8) : Rgba(0x60, 0xCD, 0xFF);
+            } else if (state.percent <= 20) {
+                fillCol = lightTheme ? Rgba(0xC4, 0x2B, 0x1C) : Rgba(0xFF, 0x99, 0xA4);
+            } else if (state.percent <= 30) {
+                fillCol = lightTheme ? Rgba(0x9D, 0x5D, 0x00) : Rgba(0xFC, 0xE1, 0x00);
+            } else {
+                fillCol = lightTheme ? Rgba(0x0F, 0x7B, 0x0F) : Rgba(0x6C, 0xCB, 0x5F);
+            }
+
+            const float fillW = std::clamp(barW * (state.percent / 100.0f), barH, barW);
+            ComPtr<ID2D1SolidColorBrush> fillBrush;
+            if (SUCCEEDED(rt->CreateSolidColorBrush(fillCol, fillBrush.put()))) {
+                const D2D1_ROUNDED_RECT fill = D2D1::RoundedRect(
+                    D2D1::RectF(padX, barY, padX + fillW, barY + barH), radius, radius);
+                rt->FillRoundedRectangle(fill, fillBrush.get());
+            }
+        }
+    }
+
+    if (FAILED(rt->EndDraw())) return nullptr;
 
     HDC screenDc = GetDC(nullptr);
     if (!screenDc) return nullptr;
-    HDC memDc = CreateCompatibleDC(screenDc);
-    ReleaseDC(nullptr, screenDc);
-    if (!memDc) return nullptr;
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -69,81 +223,24 @@ HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightT
     bmi.bmiHeader.biCompression = BI_RGB;
 
     void* bits = nullptr;
-    HBITMAP colorBmp = CreateDIBSection(memDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HBITMAP colorBmp = CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screenDc);
     if (!colorBmp || !bits) {
         if (colorBmp) DeleteObject(colorBmp);
-        DeleteDC(memDc);
         return nullptr;
     }
 
-    auto* pixels = static_cast<uint8_t*>(bits);
-    std::memset(pixels, 0, static_cast<size_t>(size) * static_cast<size_t>(size) * 4u);
-
-    HGDIOBJ oldBmp = SelectObject(memDc, colorBmp);
-    const int barH = std::max(2, size / 10);
-    const int glyphBoxH = size - barH - 1;
-
-    LOGFONTW lf{};
-    lf.lfHeight = -std::max(10, (glyphBoxH * 92) / 100);
-    lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = ANTIALIASED_QUALITY;
-    wcscpy_s(lf.lfFaceName, PickIconFontName());
-
-    HFONT font = CreateFontIndirectW(&lf);
-    if (font) {
-        HGDIOBJ oldFont = SelectObject(memDc, font);
-        SetBkMode(memDc, TRANSPARENT);
-        SetTextColor(memDc, RGB(255, 255, 255));
-        RECT rc{0, 0, size, glyphBoxH};
-        wchar_t text[2] = {glyph, L'\0'};
-        DrawTextW(memDc, text, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SelectObject(memDc, oldFont);
-        DeleteObject(font);
+    const UINT stride = static_cast<UINT>(size) * 4u;
+    if (FAILED(wicBmp->CopyPixels(nullptr, stride, stride * static_cast<UINT>(size), static_cast<BYTE*>(bits)))) {
+        DeleteObject(colorBmp);
+        return nullptr;
     }
 
-    // Flush queued GDI draw ops before reading grayscale coverage from the DIB buffer
-    GdiFlush();
+    // Explicitly zeroed WORD-aligned 1bpp mask bitmap
+    const size_t maskStride = ((static_cast<size_t>(size) + 15u) / 16u) * 2u;
+    std::vector<uint8_t> maskZero(maskStride * static_cast<size_t>(size), 0u);
+    HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, maskZero.data());
 
-    const uint8_t fg = lightTheme ? 0x1Fu : 0xFFu;
-    const unsigned opacity = state.online ? 255u : 115u;
-    const size_t totalPixels = static_cast<size_t>(size) * static_cast<size_t>(size);
-    for (size_t i = 0; i < totalPixels; ++i) {
-        uint8_t* px = pixels + i * 4u;
-        const uint8_t cov = std::max({px[0], px[1], px[2]});
-        const uint8_t alpha = static_cast<uint8_t>((static_cast<unsigned>(cov) * opacity + 127u) / 255u);
-        WritePremulBgra(px, fg, fg, fg, alpha);
-    }
-
-    if (state.online && state.percent >= 0) {
-        const int padX = std::max(1, size / 12);
-        const int barW = std::max(2, size - padX * 2);
-        const int filledW = std::clamp((barW * state.percent + 50) / 100, (state.percent > 0 ? 1 : 0), barW);
-
-        uint8_t barR = 0x2E, barG = 0xCC, barB = 0x71; // green
-        if (!state.charging && state.percent <= 20) {
-            barR = 0xE5; barG = 0x39; barB = 0x35; // red
-        } else if (state.charging) {
-            barR = 0x38; barG = 0xB6; barB = 0xFF; // accent blue while charging
-        }
-        const uint8_t trk = lightTheme ? 0x20u : 0xFFu;
-
-        for (int y = size - barH; y < size; ++y) {
-            for (int x = padX; x < padX + barW; ++x) {
-                uint8_t* px = pixels + (static_cast<size_t>(y) * static_cast<size_t>(size) + static_cast<size_t>(x)) * 4u;
-                if (x < padX + filledW) {
-                    WritePremulBgra(px, barR, barG, barB, 255u);
-                } else {
-                    WritePremulBgra(px, trk, trk, trk, 72u);
-                }
-            }
-        }
-    }
-
-    SelectObject(memDc, oldBmp);
-    DeleteDC(memDc);
-
-    HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, nullptr);
     HICON icon = nullptr;
     if (maskBmp) {
         ICONINFO ii{};

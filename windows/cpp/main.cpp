@@ -1,7 +1,9 @@
+#include "icon.hpp"
 #include "scanner.hpp"
 #include "tray.hpp"
 
 #include <dbt.h>
+#include <objbase.h>
 
 #include <cwchar>
 #include <mutex>
@@ -48,7 +50,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
     switch (msg) {
         case WM_APP_TRAY:
-            // LMB and double-click are intentionally ignored; battery info is hover-only.
             if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
                 g_app->tray.ShowContextMenu(hwnd);
             }
@@ -99,6 +100,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
+        case WM_DPICHANGED:
+        case WM_DISPLAYCHANGE:
+            g_app->tray.ReaddIcons();
+            return 0;
+
         case WM_DESTROY:
             KillTimer(hwnd, kTimerDebounce);
             if (g_app) {
@@ -118,10 +124,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
     HANDLE singleMutex = CreateMutexW(nullptr, FALSE, L"Local\\BattTraySingleInstance");
-    if (!singleMutex) return 1;
+    if (!singleMutex) {
+        if (SUCCEEDED(comHr)) CoUninitialize();
+        return 1;
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(singleMutex);
+        if (SUCCEEDED(comHr)) CoUninitialize();
         return 0;
     }
 
@@ -132,6 +145,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     wc.lpszClassName = L"BattTrayHiddenWindow";
     if (!RegisterClassExW(&wc)) {
         CloseHandle(singleMutex);
+        if (SUCCEEDED(comHr)) CoUninitialize();
         return 1;
     }
 
@@ -141,13 +155,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     app.scanEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_app = &app;
 
-    // Hidden top-level window (not HWND_MESSAGE) so broadcast WM_SETTINGCHANGE/TaskbarCreated arrive.
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, nullptr, nullptr, hInst, nullptr);
     if (!hwnd || !app.stopEvent || !app.scanEvent) {
         if (hwnd) DestroyWindow(hwnd);
         if (app.stopEvent) CloseHandle(app.stopEvent);
         if (app.scanEvent) CloseHandle(app.scanEvent);
         CloseHandle(singleMutex);
+        ShutdownIconRenderer();
+        if (SUCCEEDED(comHr)) CoUninitialize();
         return 1;
     }
 
@@ -164,5 +179,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     CloseHandle(app.stopEvent);
     CloseHandle(app.scanEvent);
     CloseHandle(singleMutex);
+    ShutdownIconRenderer();
+    if (SUCCEEDED(comHr)) CoUninitialize();
     return 0;
 }

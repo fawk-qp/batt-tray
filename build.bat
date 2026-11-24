@@ -27,3 +27,4 @@ if %errorlevel%==0 (
 
 echo Done. Binaries in dist\
 endlocal
+x`

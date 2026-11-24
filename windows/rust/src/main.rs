@@ -123,6 +123,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             0
         }
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    app.tray.readd_icons();
+                }
+            });
+            0
+        }
         WM_SETTINGCHANGE => {
             if lparam != 0 {
                 let ptr = lparam as *const u16;
@@ -159,6 +167,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
 fn main() {
     unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let mutex_name = to_wide("Local\\BattTraySingleInstance");
         let single_mutex = CreateMutexW(null_mut(), 0, mutex_name.as_ptr());
         if single_mutex.is_null() {

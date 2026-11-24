@@ -33,10 +33,12 @@ pub const WM_NULL: u32 = 0x0000;
 pub const WM_DESTROY: u32 = 0x0002;
 pub const WM_SETTINGCHANGE: u32 = 0x001A;
 pub const WM_CONTEXTMENU: u32 = 0x007B;
+pub const WM_DISPLAYCHANGE: u32 = 0x007E;
 pub const WM_COMMAND: u32 = 0x0111;
 pub const WM_TIMER: u32 = 0x0113;
 pub const WM_RBUTTONUP: u32 = 0x0205;
 pub const WM_DEVICECHANGE: u32 = 0x0219;
+pub const WM_DPICHANGED: u32 = 0x02E0;
 pub const WM_APP: u32 = 0x8000;
 
 pub const DBT_DEVNODES_CHANGED: usize = 0x0007;
@@ -80,6 +82,7 @@ pub const WAIT_OBJECT_0: u32 = 0x0000_0000;
 pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
 pub const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: *mut c_void = -4isize as *mut c_void;
 pub const GENERIC_READ: u32 = 0x8000_0000;
 pub const FILE_SHARE_READ: u32 = 0x0000_0001;
 pub const FILE_SHARE_WRITE: u32 = 0x0000_0002;
@@ -348,6 +351,11 @@ extern "system" {
     pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *const c_void) -> usize;
     pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> BOOL;
     pub fn GetSystemMetrics(nIndex: i32) -> i32;
+    pub fn SetProcessDpiAwarenessContext(value: *mut c_void) -> BOOL;
+    pub fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
+    pub fn GetDpiForWindow(hwnd: HWND) -> u32;
+    pub fn GetDpiForSystem() -> u32;
+    pub fn GetSystemMetricsForDpi(nIndex: i32, dpi: u32) -> i32;
     pub fn GetDC(hWnd: HWND) -> HDC;
     pub fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
     pub fn DrawTextW(hdc: HDC, lpchText: *const u16, cchText: i32, lprc: *mut RECT, format: u32) -> i32;
