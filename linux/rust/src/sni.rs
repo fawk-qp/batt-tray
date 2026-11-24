@@ -491,7 +491,7 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
     HIDE_OFFLINE.store(hide_offline, Ordering::Relaxed);
     let pid = getpid();
     let mut err = DbusErr::new();
-    let mut init_slots = Vec::with_capacity(3);
+    let mut init_slots: Vec<TraySlot> = Vec::with_capacity(3);
 
     for (i, spec) in SLOT_SPECS.iter().enumerate() {
         err.reset();

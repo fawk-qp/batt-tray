@@ -5,8 +5,8 @@
 #include <setupapi.h>
 
 extern "C" {
-#include <hidpi.h>
 #include <hidsdi.h>
+#include <hidpi.h>
 }
 
 #include <algorithm>
