@@ -134,7 +134,7 @@ fn zero_nid(hwnd: HWND, uid: u32) -> NOTIFYICONDATAW {
     }
 }
 
-ffn truncate_chars(s: &str, max_chars: usize) -> String {
+fn truncate_chars(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
