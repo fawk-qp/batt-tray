@@ -46,10 +46,7 @@ thread_local! {
 unsafe fn apply_hardening_and_eco_mode() {
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
 
-    // Block dynamic code generation (2), invalid handles (3), extension points (6), non-system fonts (9), unsafe image loads (10)
-    let dyn_code = MitigationFlagsPolicy { flags: 0x1 };
-    SetProcessMitigationPolicy(2, &dyn_code as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
-
+    // Block invalid handles (3), extension points (6), non-system fonts (9), unsafe image loads (10)
     let handle_chk = MitigationFlagsPolicy { flags: 0x1 | 0x2 };
     SetProcessMitigationPolicy(3, &handle_chk as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
 
