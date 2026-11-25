@@ -125,12 +125,13 @@ unsafe fn handle_menu_cmd(hwnd: HWND, cmd: usize) -> bool {
             });
             if let Some((addr, ev_ptr)) = disc {
                 thread::spawn(move || {
+                    let ev = ev_ptr;
                     scanner::disconnect_bluetooth_device(addr);
-                    if !ev_ptr.0.is_null() {
-                        SetEvent(ev_ptr.0);
+                    if !ev.0.is_null() {
+                        SetEvent(ev.0);
                         Sleep(1200);
-                        SetEvent(ev_ptr.0);
-                        CloseHandle(ev_ptr.0);
+                        SetEvent(ev.0);
+                        CloseHandle(ev.0);
                     }
                 });
             }
