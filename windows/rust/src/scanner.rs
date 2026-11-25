@@ -9,6 +9,10 @@ const PROP_BLUETOOTH_BATTERY: DEVPROPKEY = DEVPROPKEY {
     fmtid: GUID { data1: 0x104EA319, data2: 0x6EE2, data3: 0x4701, data4: [0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5] },
     pid: 2,
 };
+const PROP_BLUETOOTH_ADDRESS: DEVPROPKEY = DEVPROPKEY {
+    fmtid: GUID { data1: 0x2BD67D8B, data2: 0x8BEB, data3: 0x48D5, data4: [0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A] },
+    pid: 1,
+};
 const PROP_BLUETOOTH_COD: DEVPROPKEY = DEVPROPKEY {
     fmtid: GUID { data1: 0x2BD67D8B, data2: 0x8BEB, data3: 0x48D5, data4: [0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A] },
     pid: 10,
@@ -87,6 +91,43 @@ fn format_guid_lower(g: &GUID) -> String {
         g.data4[0], g.data4[1], g.data4[2], g.data4[3],
         g.data4[4], g.data4[5], g.data4[6], g.data4[7],
     )
+}
+
+fn parse_bth_address(raw: &str) -> u64 {
+    let hex: String = raw.chars().filter(|&c| c != ':' && c != '-' && c != ' ').collect();
+    if hex.len() != 12 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return 0;
+    }
+    u64::from_str_radix(&hex, 16).unwrap_or(0)
+}
+
+unsafe fn extract_bth_addr_from_instance_id(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA) -> u64 {
+    let mut buf = [0u16; 256];
+    if SetupDiGetDeviceInstanceIdW(set, dev, buf.as_mut_ptr(), buf.len() as u32, null_mut()) == 0 {
+        return 0;
+    }
+    let inst = from_wide_slice(&buf).to_lowercase();
+    for tag in ["dev_", "bluetoothdevice_"] {
+        if let Some(pos) = inst.find(tag) {
+            let start = pos + tag.len();
+            if start + 12 <= inst.len() && inst.is_char_boundary(start) && inst.is_char_boundary(start + 12) {
+                let addr = parse_bth_address(&inst[start..start + 12]);
+                if addr != 0 {
+                    return addr;
+                }
+            }
+        }
+    }
+    0
+}
+
+unsafe fn resolve_bth_address(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA) -> u64 {
+    let addr = parse_bth_address(&read_dev_prop_string(set, dev, &PROP_BLUETOOTH_ADDRESS));
+    if addr != 0 {
+        addr
+    } else {
+        extract_bth_addr_from_instance_id(set, dev)
+    }
 }
 
 unsafe fn read_pwstr(ptr: *const u16) -> String {
@@ -275,12 +316,14 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
         name: String,
         pnp_class: String,
         container_id: String,
+        bth_addr: u64,
         cod: u32,
         pct: i32,
         node_conn: i8,
     }
 
     let mut container_conn: HashMap<String, i8> = HashMap::new();
+    let mut container_addr: HashMap<String, u64> = HashMap::new();
     let mut raw: Vec<RawCand> = Vec::new();
     let mut idx = 0u32;
 
@@ -293,12 +336,18 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
 
         let cid = read_dev_prop_guid(set.0, &mut dev, &PROP_CONTAINER_ID);
         let conn_state = read_dev_prop_bool(set.0, &mut dev, &PROP_IS_CONNECTED);
-        if !cid.is_empty() && conn_state != 0 {
-            let entry = container_conn.entry(cid.clone()).or_insert(0);
-            if conn_state > 0 {
-                *entry = 1;
-            } else if *entry == 0 {
-                *entry = -1;
+        let node_addr = resolve_bth_address(set.0, &mut dev);
+        if !cid.is_empty() {
+            if conn_state != 0 {
+                let entry = container_conn.entry(cid.clone()).or_insert(0);
+                if conn_state > 0 {
+                    *entry = 1;
+                } else if *entry == 0 {
+                    *entry = -1;
+                }
+            }
+            if node_addr != 0 {
+                container_addr.entry(cid.clone()).or_insert(node_addr);
             }
         }
 
@@ -313,6 +362,7 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
             name: resolve_dev_name(set.0, &mut dev),
             pnp_class: read_dev_prop_string(set.0, &mut dev, &PROP_DEVICE_CLASS),
             container_id: cid,
+            bth_addr: node_addr,
             cod: read_dev_prop_u32(set.0, &mut dev, &PROP_BLUETOOTH_COD),
             pct: pct as i32,
             node_conn: conn_state,
@@ -325,9 +375,18 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
         } else {
             cand.node_conn
         };
+        // Skip paired Bluetooth devices explicitly reported as disconnected (stale cached battery)
         if state < 0 {
             continue;
         }
+
+        let addr = if cand.bth_addr != 0 {
+            cand.bth_addr
+        } else if !cand.container_id.is_empty() {
+            container_addr.get(&cand.container_id).copied().unwrap_or(0)
+        } else {
+            0
+        };
 
         let is_active = matches_active_audio(audio, &cand.container_id, &cand.name);
         let mut kind = classify_device(&cand.name, &cand.pnp_class, cand.cod);
@@ -342,6 +401,7 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
                 key: String::new(),
                 name: cand.name,
                 container_id: cand.container_id,
+                bth_addr: addr,
                 percent: cand.pct,
                 charging: false,
                 active_audio: is_active,
@@ -468,6 +528,7 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo) {
                         let name = resolve_dev_name(set.0, &mut dev);
                         let cls = read_dev_prop_string(set.0, &mut dev, &PROP_DEVICE_CLASS);
                         let cid = read_dev_prop_guid(set.0, &mut dev, &PROP_CONTAINER_ID);
+                        let addr = resolve_bth_address(set.0, &mut dev);
                         let cod = read_dev_prop_u32(set.0, &mut dev, &PROP_BLUETOOTH_COD);
                         let is_active = matches_active_audio(audio, &cid, &name);
                         let mut kind = classify_device(&name, &cls, cod);
@@ -482,6 +543,7 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo) {
                                 key: String::new(),
                                 name,
                                 container_id: cid,
+                                bth_addr: addr,
                                 percent: pct as i32,
                                 charging: false,
                                 active_audio: is_active,
@@ -505,4 +567,63 @@ pub fn scan_all_devices() -> [DeviceState; 3] {
     }
     finalize_devices(&mut out);
     out
+}
+
+pub fn disconnect_bluetooth_device(bth_addr: u64) -> bool {
+    if bth_addr == 0 {
+        return false;
+    }
+    unsafe {
+        let dll_name = to_wide("BluetoothAPIs.dll");
+        let dll = ModuleGuard(LoadLibraryExW(dll_name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32));
+        if dll.0.is_null() {
+            return false;
+        }
+
+        let p_first = GetProcAddress(dll.0, b"BluetoothFindFirstRadio\0".as_ptr() as *const i8);
+        let p_next = GetProcAddress(dll.0, b"BluetoothFindNextRadio\0".as_ptr() as *const i8);
+        let p_close = GetProcAddress(dll.0, b"BluetoothFindRadioClose\0".as_ptr() as *const i8);
+        if p_first.is_null() || p_next.is_null() || p_close.is_null() {
+            return false;
+        }
+        let find_first: FnBluetoothFindFirstRadio = transmute(p_first);
+        let find_next: FnBluetoothFindNextRadio = transmute(p_next);
+        let find_close: FnBluetoothFindRadioClose = transmute(p_close);
+
+        let params = BLUETOOTH_FIND_RADIO_PARAMS { dwSize: size_of::<BLUETOOTH_FIND_RADIO_PARAMS>() as u32 };
+        let mut h_radio: HANDLE = null_mut();
+        let h_find = find_first(&params, &mut h_radio);
+        if h_find.is_null() {
+            return false;
+        }
+
+        // IOCTL_BTH_DISCONNECT_DEVICE (FILE_DEVICE_BLUETOOTH=0x41, function=0x03, METHOD_BUFFERED)
+        const IOCTL_BTH_DISCONNECT_DEVICE: u32 = 0x0041_000C;
+        let mut disconnected = false;
+        loop {
+            if !h_radio.is_null() {
+                let mut bytes = 0u32;
+                if DeviceIoControl(
+                    h_radio,
+                    IOCTL_BTH_DISCONNECT_DEVICE,
+                    &bth_addr as *const u64 as *const c_void,
+                    size_of::<u64>() as u32,
+                    null_mut(),
+                    0,
+                    &mut bytes,
+                    null_mut(),
+                ) != 0
+                {
+                    disconnected = true;
+                }
+                CloseHandle(h_radio);
+                h_radio = null_mut();
+            }
+            if find_next(h_find, &mut h_radio) == 0 {
+                break;
+            }
+        }
+        find_close(h_find);
+        disconnected
+    }
 }
