@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 enum class DeviceKind : int {
     Mouse = 0,
@@ -11,11 +12,19 @@ enum class DeviceKind : int {
     Unknown = 3,
 };
 
+struct DeviceEntry {
+    std::string key;
+    std::string name;
+    int percent = -1;
+    bool charging = false;
+};
+
 struct DeviceState {
     std::string name;
     int percent = -1;
     bool online = false;
     bool charging = false;
+    std::vector<DeviceEntry> items;
 };
 
 struct SlotSpec {
@@ -28,5 +37,6 @@ struct SlotSpec {
 const std::array<SlotSpec, 3>& GetSlotSpecs();
 std::string ToLower(std::string s);
 std::string Trim(std::string s);
+std::string SanitizeDeviceText(const std::string& s, size_t maxChars = 64);
 DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint = "", uint32_t cod = 0);
 void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const std::string& name, int percent, bool charging);

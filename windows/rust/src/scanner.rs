@@ -202,7 +202,6 @@ unsafe fn read_dev_prop_byte(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEV
     }
 }
 
-// Tri-state: 1 = connected, -1 = explicitly disconnected, 0 = absent
 unsafe fn read_dev_prop_bool(set: HDEVINFO, dev: &mut SP_DEVINFO_DATA, key: &DEVPROPKEY) -> i8 {
     let mut prop_type = 0u32;
     let mut val = 0u8;
@@ -340,6 +339,7 @@ unsafe fn scan_pnp_bluetooth(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo
             out,
             kind,
             DeviceEntry {
+                key: String::new(),
                 name: cand.name,
                 container_id: cand.container_id,
                 percent: cand.pct,
@@ -479,6 +479,7 @@ unsafe fn scan_ble_gatt(out: &mut [DeviceState; 3], audio: &ActiveAudioInfo) {
                             out,
                             kind,
                             DeviceEntry {
+                                key: String::new(),
                                 name,
                                 container_id: cid,
                                 percent: pct as i32,

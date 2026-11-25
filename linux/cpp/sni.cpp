@@ -3,6 +3,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -174,8 +175,29 @@ void AppendMenuItemProps(DBusMessageIter* props, const SniManager::Slot& s, dbus
         AppendDictStr(props, "label", s.menuStatus.c_str());
         AppendDictBool(props, "enabled", false);
         AppendDictBool(props, "visible", true);
-    } else if (id == 11 || id == 2) {
+    } else if (id == 11 || id == 21 || id == 23 || id == 2) {
         AppendDictStr(props, "type", "separator");
+        AppendDictBool(props, "visible", true);
+    } else if (id == 20) {
+        AppendDictStr(props, "label", "История (неактивные)");
+        AppendDictStr(props, "children-display", "submenu");
+        AppendDictBool(props, "enabled", true);
+        AppendDictBool(props, "visible", true);
+    } else if (id == 22) {
+        AppendDictStr(props, "label", "Очистить историю");
+        AppendDictBool(props, "enabled", true);
+        AppendDictBool(props, "visible", true);
+    } else if (id >= 100 && id < 200) {
+        const size_t idx = static_cast<size_t>(id - 100);
+        if (idx < s.inactiveMenu.size()) {
+            AppendDictStr(props, "label", s.inactiveMenu[idx].label.c_str());
+            AppendDictStr(props, "children-display", "submenu");
+            AppendDictBool(props, "enabled", true);
+            AppendDictBool(props, "visible", true);
+        }
+    } else if (id >= 200 && id < 300) {
+        AppendDictStr(props, "label", "Удалить из истории");
+        AppendDictBool(props, "enabled", true);
         AppendDictBool(props, "visible", true);
     } else if (id == 1) {
         AppendDictStr(props, "label", "Обновить сейчас");
@@ -202,8 +224,25 @@ void AppendMenuItem(DBusMessageIter* parent, const SniManager::Slot& s, dbus_int
     dbus_message_iter_close_container(&st, &props);
     dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "v", &children);
     if (id == 0) {
-        for (dbus_int32_t childId : {10, 11, 1, 2, 3}) {
-            AppendMenuItem(&children, s, childId, true);
+        AppendMenuItem(&children, s, 10, true);
+        AppendMenuItem(&children, s, 11, true);
+        if (!s.inactiveMenu.empty()) {
+            AppendMenuItem(&children, s, 20, true);
+            AppendMenuItem(&children, s, 23, true);
+        }
+        AppendMenuItem(&children, s, 1, true);
+        AppendMenuItem(&children, s, 2, true);
+        AppendMenuItem(&children, s, 3, true);
+    } else if (id == 20) {
+        for (size_t j = 0; j < s.inactiveMenu.size(); ++j) {
+            AppendMenuItem(&children, s, static_cast<dbus_int32_t>(100 + j), true);
+        }
+        AppendMenuItem(&children, s, 21, true);
+        AppendMenuItem(&children, s, 22, true);
+    } else if (id >= 100 && id < 200) {
+        const size_t idx = static_cast<size_t>(id - 100);
+        if (idx < s.inactiveMenu.size()) {
+            AppendMenuItem(&children, s, static_cast<dbus_int32_t>(200 + idx), true);
         }
     }
     dbus_message_iter_close_container(&st, &children);
@@ -324,10 +363,25 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
     } else if (dbus_message_is_method_call(msg, "com.canonical.dbusmenu", "GetGroupProperties")) {
         rep.p = dbus_message_new_method_return(msg);
         if (rep) {
+            std::vector<dbus_int32_t> ids = {10, 11};
+            if (!slot->inactiveMenu.empty()) {
+                ids.push_back(20);
+                for (size_t j = 0; j < slot->inactiveMenu.size(); ++j) {
+                    ids.push_back(static_cast<dbus_int32_t>(100 + j));
+                    ids.push_back(static_cast<dbus_int32_t>(200 + j));
+                }
+                ids.push_back(21);
+                ids.push_back(22);
+                ids.push_back(23);
+            }
+            ids.push_back(1);
+            ids.push_back(2);
+            ids.push_back(3);
+
             DBusMessageIter it, arr;
             dbus_message_iter_init_append(rep.p, &it);
             dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "(ia{sv})", &arr);
-            for (dbus_int32_t id : {10, 11, 1, 2, 3}) {
+            for (dbus_int32_t id : ids) {
                 DBusMessageIter st, props;
                 dbus_message_iter_open_container(&arr, DBUS_TYPE_STRUCT, nullptr, &st);
                 dbus_message_iter_append_basic(&st, DBUS_TYPE_INT32, &id);
@@ -352,9 +406,14 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
             if (dbus_message_iter_next(&it) && dbus_message_iter_get_arg_type(&it) == DBUS_TYPE_STRING) {
                 const char* ev = nullptr;
                 dbus_message_iter_get_basic(&it, &ev);
-                if (ev && std::strcmp(ev, "clicked") == 0 && slot->owner && slot->owner->Control()) {
-                    if (id == 1) slot->owner->Control()->scanDueMs = 0;
-                    else if (id == 3) slot->owner->Control()->running = false;
+                if (ev && std::strcmp(ev, "clicked") == 0 && slot->owner) {
+                    if (id == 1 && slot->owner->Control()) {
+                        slot->owner->Control()->scanDueMs = 0;
+                    } else if (id == 3 && slot->owner->Control()) {
+                        slot->owner->Control()->running = false;
+                    } else if (id == 22 || (id >= 200 && id < 300)) {
+                        slot->owner->HandleHistoryAction(slot->index, id);
+                    }
                 }
             }
         }
@@ -444,9 +503,10 @@ SniManager::~SniManager() {
     Shutdown();
 }
 
-bool SniManager::Init(bool hideOffline, ControlState* ctrl) {
+bool SniManager::Init(bool hideOffline, bool demoMode, ControlState* ctrl) {
     hideOffline_ = hideOffline;
     ctrl_ = ctrl;
+    history_.Load(demoMode);
 
     static DBusObjectPathVTable sniVt{nullptr, HandleSni, nullptr, nullptr, nullptr, nullptr};
     static DBusObjectPathVTable menuVt{nullptr, HandleMenu, nullptr, nullptr, nullptr, nullptr};
@@ -456,6 +516,7 @@ bool SniManager::Init(bool hideOffline, ControlState* ctrl) {
     DbusErr err;
 
     for (size_t i = 0; i < 3; ++i) {
+        slots_[i].index = i;
         slots_[i].spec = &specs[i];
         slots_[i].owner = this;
         err.Reset();
@@ -486,9 +547,48 @@ bool SniManager::Init(bool hideOffline, ControlState* ctrl) {
     return true;
 }
 
+std::vector<InactiveMenuRow> SniManager::BuildInactiveMenu(size_t slotIdx) const {
+    std::vector<InactiveMenuRow> rows;
+    const auto& spec = *slots_[slotIdx].spec;
+    const auto inactive = history_.GetInactiveForKind(spec.kind, states_[slotIdx].items);
+    const size_t limit = std::min<size_t>(inactive.size(), 10);
+    rows.reserve(limit);
+    for (size_t j = 0; j < limit; ++j) {
+        const std::string& dName = inactive[j].name.empty() ? std::string(spec.label) : inactive[j].name;
+        const std::string lbl = "○ " + dName + " — " + std::to_string(inactive[j].percent) +
+                                "% (" + DeviceHistory::FormatRelativeTime(inactive[j].lastSeenUnix) + ")";
+        rows.push_back({inactive[j].key, lbl});
+    }
+    return rows;
+}
+
 void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
+    states_ = states;
+    history_.SyncActive(states_);
     for (size_t i = 0; i < 3; ++i) {
-        UpdateSlot(slots_[i], states[i]);
+        UpdateSlot(slots_[i], states_[i]);
+    }
+}
+
+void SniManager::HandleHistoryAction(size_t slotIdx, dbus_int32_t itemId) {
+    if (slotIdx >= 3) return;
+    auto& s = slots_[slotIdx];
+    bool changed = false;
+
+    if (itemId == 22) {
+        changed = history_.ClearInactiveForKind(s.spec->kind, states_[slotIdx].items);
+    } else if (itemId >= 200 && itemId < 300) {
+        const size_t idx = static_cast<size_t>(itemId - 200);
+        if (idx < s.inactiveMenu.size()) {
+            changed = history_.RemoveEntry(s.spec->kind, s.inactiveMenu[idx].key);
+        }
+    }
+
+    if (changed) {
+        s.inactiveMenu = BuildInactiveMenu(slotIdx);
+        ++s.menuRevision;
+        EmitMenuLayoutUpdated(s);
+        if (s.conn) dbus_connection_flush(s.conn);
     }
 }
 
@@ -508,9 +608,11 @@ void SniManager::UpdateSlot(Slot& s, const DeviceState& d) {
         newStatus = hideOffline_ ? "Passive" : "Active";
     }
 
+    auto newInactive = BuildInactiveMenu(s.index);
+
     const bool tipChanged = (newTitle != s.tipTitle || newDesc != s.tipDesc);
     const bool lblChanged = (newLabel != s.label);
-    const bool menuChanged = (newMenuStatus != s.menuStatus);
+    const bool menuChanged = (newMenuStatus != s.menuStatus || !(newInactive == s.inactiveMenu));
     const bool ovChanged = (newOverlay != s.overlay);
     const bool stChanged = (newStatus != s.status);
 
@@ -518,6 +620,7 @@ void SniManager::UpdateSlot(Slot& s, const DeviceState& d) {
     s.tipDesc = std::move(newDesc);
     s.label = std::move(newLabel);
     s.menuStatus = std::move(newMenuStatus);
+    s.inactiveMenu = std::move(newInactive);
     s.overlay = std::move(newOverlay);
     s.status = std::move(newStatus);
 
@@ -539,7 +642,9 @@ void SniManager::UpdateSlot(Slot& s, const DeviceState& d) {
     if (stChanged) {
         EmitSniSignal(s, "NewStatus", s.status.c_str());
     }
-    if (s.conn) dbus_connection_flush(s.conn);
+    if (s.conn && (tipChanged || lblChanged || menuChanged || ovChanged || stChanged)) {
+        dbus_connection_flush(s.conn);
+    }
 }
 
 void SniManager::RegisterAllWatchers() {

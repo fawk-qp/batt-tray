@@ -45,9 +45,12 @@ int AcquireInstanceLock() {
 
 std::array<DeviceState, 3> BuildDemoStates() {
     std::array<DeviceState, 3> demo{};
-    demo[0] = {"Logitech G Pro X Superlight", 78, true, false};
-    demo[1] = {"Keychron K2", 42, true, true};
-    demo[2] = {"HUAWEI FreeBuds Pro 2", 18, true, false};
+    demo[0] = {"Logitech G Pro X Superlight", 78, true, false,
+               {{"logitech g pro x superlight", "Logitech G Pro X Superlight", 78, false}}};
+    demo[1] = {"Keychron K2", 42, true, true,
+               {{"keychron k2", "Keychron K2", 42, true}}};
+    demo[2] = {"HUAWEI FreeBuds Pro 2", 18, true, false,
+               {{"huawei freebuds pro 2", "HUAWEI FreeBuds Pro 2", 18, false}}};
     return demo;
 }
 
@@ -99,7 +102,7 @@ int main(int argc, char** argv) {
     }
 
     SniManager sni;
-    if (!sni.Init(hideOffline, &ctrl)) {
+    if (!sni.Init(hideOffline, demoMode, &ctrl)) {
         if (sysBus) {
             dbus_connection_close(sysBus);
             dbus_connection_unref(sysBus);

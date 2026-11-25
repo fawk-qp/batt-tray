@@ -21,6 +21,7 @@ enum class DeviceKind : int {
 };
 
 struct DeviceEntry {
+    std::wstring key;
     std::wstring name;
     std::wstring containerId;
     int percent = -1;
@@ -47,6 +48,7 @@ struct SlotSpec {
 const std::array<SlotSpec, 3>& GetSlotSpecs();
 std::wstring ToLower(std::wstring s);
 std::wstring Trim(std::wstring s);
+std::wstring SanitizeDeviceText(const std::wstring& s, size_t maxChars = 64);
 std::wstring CleanDeviceName(std::wstring s);
 bool NamesMatchAudio(const std::wstring& devName, const std::wstring& audioEndpointName);
 DeviceKind ClassifyDevice(const std::wstring& name, const std::wstring& pnpClass = L"", uint32_t cod = 0);

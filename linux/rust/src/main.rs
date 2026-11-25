@@ -1,10 +1,11 @@
 mod dbus_ffi;
 mod device;
+mod history;
 mod scanner;
 mod sni;
 
 use dbus_ffi::*;
-use device::DeviceState;
+use device::{DeviceEntry, DeviceState};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -39,9 +40,18 @@ fn acquire_lock() -> Result<Option<File>, ()> {
 
 fn build_demo_states() -> [DeviceState; 3] {
     [
-        DeviceState { name: "Logitech G Pro X Superlight".into(), percent: 78, online: true, charging: false },
-        DeviceState { name: "Keychron K2".into(), percent: 42, online: true, charging: true },
-        DeviceState { name: "HUAWEI FreeBuds Pro 2".into(), percent: 18, online: true, charging: false },
+        DeviceState {
+            name: "Logitech G Pro X Superlight".into(), percent: 78, online: true, charging: false,
+            items: vec![DeviceEntry { key: "logitech g pro x superlight".into(), name: "Logitech G Pro X Superlight".into(), percent: 78, charging: false }],
+        },
+        DeviceState {
+            name: "Keychron K2".into(), percent: 42, online: true, charging: true,
+            items: vec![DeviceEntry { key: "keychron k2".into(), name: "Keychron K2".into(), percent: 42, charging: true }],
+        },
+        DeviceState {
+            name: "HUAWEI FreeBuds Pro 2".into(), percent: 18, online: true, charging: false,
+            items: vec![DeviceEntry { key: "huawei freebuds pro 2".into(), name: "HUAWEI FreeBuds Pro 2".into(), percent: 18, charging: false }],
+        },
     ]
 }
 
@@ -93,7 +103,7 @@ fn main() {
             }
         }
 
-        let Some(slot_conns) = sni::init_slots(hide_offline) else {
+        let Some(slot_conns) = sni::init_slots(hide_offline, demo_mode) else {
             if !sys_bus.is_null() {
                 dbus_connection_close(sys_bus);
                 dbus_connection_unref(sys_bus);

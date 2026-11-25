@@ -3,6 +3,7 @@
 
 #include <shellapi.h>
 
+#include <algorithm>
 #include <cwchar>
 #include <string>
 
@@ -28,7 +29,6 @@ std::wstring FormatTooltip(const SlotSpec& spec, const DeviceState& st) {
         return tip;
     }
 
-    // Multiple connected devices: active audio endpoint first (marked with ▶), fit within 127 chars
     std::wstring tip;
     const size_t maxLines = 4;
     const size_t nameCap = (st.items.size() >= 3) ? 20u : 28u;
@@ -45,6 +45,21 @@ std::wstring FormatTooltip(const SlotSpec& spec, const DeviceState& st) {
         tip += line;
     }
     return tip;
+}
+
+std::wstring FormatMenuHeader(const SlotSpec& spec, const DeviceState& st) {
+    if (!st.online || st.items.empty()) {
+        return std::wstring(spec.label) + L": не подключено";
+    }
+    const auto& d = st.items.front();
+    std::wstring title = d.name.empty() ? std::wstring(spec.label) : TruncateName(d.name, 34);
+    std::wstring hdr = (st.items.size() > 1 ? L"\u25B6 " : L"") + title +
+                       L" — " + std::to_wstring(d.percent) + L"%" +
+                       (d.charging ? L" \u26A1" : L"");
+    if (st.items.size() > 1) {
+        hdr += L" (+" + std::to_wstring(st.items.size() - 1) + L")";
+    }
+    return hdr;
 }
 
 std::wstring GetCurrentExePath() {
@@ -66,41 +81,67 @@ std::wstring GetCurrentExePath() {
 bool TrayManager::Init(HWND hwnd) {
     hwnd_ = hwnd;
     lightTheme_ = IsTaskbarLightTheme();
+    history_.Load();
+    const int iconSize = GetTaskbarIconSize();
     for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, true);
+        ApplySlot(i, true, iconSize);
     }
+    ShutdownIconRenderer();
     return true;
 }
 
 void TrayManager::ReaddIcons() {
     if (!hwnd_) return;
     lightTheme_ = IsTaskbarLightTheme();
+    const int iconSize = GetTaskbarIconSize();
     for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, true);
+        ApplySlot(i, true, iconSize);
     }
+    ShutdownIconRenderer();
 }
 
-void TrayManager::Update(const std::array<DeviceState, 3>& states) {
+bool TrayManager::Update(const std::array<DeviceState, 3>& states) {
     states_ = states;
+    history_.SyncActive(states_);
+
+    const int iconSize = GetTaskbarIconSize();
+    bool anyRendered = false;
     for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, false);
+        const auto& spec = GetSlotSpecs()[i];
+        const std::wstring tip = FormatTooltip(spec, states_[i]);
+        const auto& c = cache_[i];
+        const bool unchanged = c.valid &&
+                               c.online == states_[i].online &&
+                               c.percent == states_[i].percent &&
+                               c.charging == states_[i].charging &&
+                               c.lightTheme == lightTheme_ &&
+                               c.iconSize == iconSize &&
+                               c.tip == tip;
+        if (unchanged) continue;
+        ApplySlot(i, false, iconSize);
+        anyRendered = true;
     }
+    if (anyRendered) ShutdownIconRenderer();
+    return anyRendered;
 }
 
 void TrayManager::RefreshTheme() {
     const bool light = IsTaskbarLightTheme();
     if (light == lightTheme_) return;
     lightTheme_ = light;
+    const int iconSize = GetTaskbarIconSize();
     for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, false);
+        ApplySlot(i, false, iconSize);
     }
+    ShutdownIconRenderer();
 }
 
-void TrayManager::ApplySlot(size_t idx, bool add) {
+void TrayManager::ApplySlot(size_t idx, bool add, int iconSize) {
     const auto& spec = GetSlotSpecs()[idx];
     HICON nextIcon = CreateBatteryTrayIcon(spec.glyph, states_[idx], lightTheme_);
     if (!nextIcon) return;
 
+    const std::wstring tip = FormatTooltip(spec, states_[idx]);
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
     nid.hWnd = hwnd_;
@@ -108,8 +149,6 @@ void TrayManager::ApplySlot(size_t idx, bool add) {
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_APP_TRAY;
     nid.hIcon = nextIcon;
-
-    const std::wstring tip = FormatTooltip(spec, states_[idx]);
     wcsncpy_s(nid.szTip, _countof(nid.szTip), tip.c_str(), _TRUNCATE);
 
     if (!Shell_NotifyIconW(add ? NIM_ADD : NIM_MODIFY, &nid) && !add) {
@@ -118,11 +157,62 @@ void TrayManager::ApplySlot(size_t idx, bool add) {
 
     if (icons_[idx]) DestroyIcon(icons_[idx]);
     icons_[idx] = nextIcon;
+
+    cache_[idx] = {
+        true,
+        states_[idx].online,
+        states_[idx].charging,
+        lightTheme_,
+        states_[idx].percent,
+        iconSize,
+        tip
+    };
 }
 
-void TrayManager::ShowContextMenu(HWND hwnd) const {
+void TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
+    menuSlot_ = 0;
+    const auto& specs = GetSlotSpecs();
+    for (size_t i = 0; i < specs.size(); ++i) {
+        if (specs[i].uid == uid) {
+            menuSlot_ = i;
+            break;
+        }
+    }
+    menuInactiveKeys_.clear();
+
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
+
+    const std::wstring header = FormatMenuHeader(specs[menuSlot_], states_[menuSlot_]);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_HEADER, header.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+    const auto inactive = history_.GetInactiveForKind(specs[menuSlot_].kind, states_[menuSlot_].items);
+    if (!inactive.empty()) {
+        HMENU histMenu = CreatePopupMenu();
+        if (histMenu) {
+            const size_t limit = std::min<size_t>(inactive.size(), 10);
+            for (size_t j = 0; j < limit; ++j) {
+                HMENU itemSub = CreatePopupMenu();
+                if (!itemSub) continue;
+                menuInactiveKeys_.push_back(inactive[j].key);
+                const UINT delId = IDM_HIST_DEL_BASE + static_cast<UINT>(menuInactiveKeys_.size() - 1);
+                AppendMenuW(itemSub, MF_STRING, delId, L"Удалить из истории");
+
+                const std::wstring dName = inactive[j].name.empty()
+                    ? std::wstring(specs[menuSlot_].label)
+                    : TruncateName(inactive[j].name, 28);
+                const std::wstring itemText = L"\u25CB " + dName + L" — " +
+                    std::to_wstring(inactive[j].percent) + L"% (" +
+                    DeviceHistory::FormatRelativeTime(inactive[j].lastSeenUnix) + L")";
+                AppendMenuW(histMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(itemSub), itemText.c_str());
+            }
+            AppendMenuW(histMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(histMenu, MF_STRING, IDM_HIST_CLEAR, L"Очистить историю");
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(histMenu), L"История (неактивные)");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+    }
 
     AppendMenuW(menu, MF_STRING, IDM_REFRESH, L"Обновить сейчас");
     AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : MF_UNCHECKED),
@@ -136,6 +226,22 @@ void TrayManager::ShowContextMenu(HWND hwnd) const {
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
+}
+
+void TrayManager::HandleMenuCommand(UINT cmdId) {
+    const auto& specs = GetSlotSpecs();
+    if (cmdId == IDM_HIST_CLEAR) {
+        history_.ClearInactiveForKind(specs[menuSlot_].kind, states_[menuSlot_].items);
+        menuInactiveKeys_.clear();
+        return;
+    }
+    if (cmdId >= IDM_HIST_DEL_BASE) {
+        const size_t idx = static_cast<size_t>(cmdId - IDM_HIST_DEL_BASE);
+        if (idx < menuInactiveKeys_.size()) {
+            history_.RemoveEntry(specs[menuSlot_].kind, menuInactiveKeys_[idx]);
+        }
+        menuInactiveKeys_.clear();
+    }
 }
 
 void TrayManager::Shutdown() {

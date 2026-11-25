@@ -80,13 +80,6 @@ const wchar_t* PickIconFontName() {
     return cached;
 }
 
-int GetTaskbarIconSize() {
-    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    UINT dpi = taskbar ? GetDpiForWindow(taskbar) : GetDpiForSystem();
-    if (dpi == 0) dpi = 96u;
-    return std::clamp(GetSystemMetricsForDpi(SM_CXSMICON, dpi), 16, 64);
-}
-
 inline D2D1_COLOR_F Rgba(uint8_t r, uint8_t g, uint8_t b, float a = 1.0f) {
     return D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, a);
 }
@@ -105,6 +98,13 @@ bool IsTaskbarLightTheme() {
         &val,
         &cb);
     return (rc == ERROR_SUCCESS && val != 0);
+}
+
+int GetTaskbarIconSize() {
+    HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
+    UINT dpi = taskbar ? GetDpiForWindow(taskbar) : GetDpiForSystem();
+    if (dpi == 0) dpi = 96u;
+    return std::clamp(GetSystemMetricsForDpi(SM_CXSMICON, dpi), 16, 64);
 }
 
 void ShutdownIconRenderer() {
@@ -137,7 +137,6 @@ HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightT
     rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
-    // Proportions aligned to the Windows 11 16-DIP tray icon grid
     const float barH = std::max(2.0f, std::round(2.0f * scale));
     const float bottomPad = (size >= 24) ? 1.0f : 0.0f;
     const float gap = std::max(1.0f, std::round(1.0f * scale));
@@ -162,7 +161,6 @@ HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightT
         return nullptr;
     }
 
-    // Windows 11 Fluent icon colors
     const float glyphAlpha = state.online ? (lightTheme ? 0.92f : 1.0f) : 0.42f;
     const D2D1_COLOR_F glyphCol = lightTheme ? Rgba(0x1A, 0x1A, 0x1A, glyphAlpha)
                                              : Rgba(0xFF, 0xFF, 0xFF, glyphAlpha);
@@ -217,7 +215,7 @@ HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightT
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = size;
-    bmi.bmiHeader.biHeight = -size; // top-down DIB
+    bmi.bmiHeader.biHeight = -size;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -236,7 +234,6 @@ HICON CreateBatteryTrayIcon(wchar_t glyph, const DeviceState& state, bool lightT
         return nullptr;
     }
 
-    // Explicitly zeroed WORD-aligned 1bpp mask bitmap
     const size_t maskStride = ((static_cast<size_t>(size) + 15u) / 16u) * 2u;
     std::vector<uint8_t> maskZero(maskStride * static_cast<size_t>(size), 0u);
     HBITMAP maskBmp = CreateBitmap(size, size, 1, 1, maskZero.data());

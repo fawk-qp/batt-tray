@@ -52,8 +52,19 @@ std::wstring Trim(std::wstring s) {
     return s.substr(i);
 }
 
+std::wstring SanitizeDeviceText(const std::wstring& s, size_t maxChars) {
+    std::wstring clean;
+    clean.reserve(std::min(s.size(), maxChars));
+    for (wchar_t ch : s) {
+        if (ch < 0x20 || ch == 0x7F) continue;
+        clean.push_back(ch);
+        if (clean.size() >= maxChars) break;
+    }
+    return Trim(std::move(clean));
+}
+
 std::wstring CleanDeviceName(std::wstring s) {
-    s = Trim(std::move(s));
+    s = SanitizeDeviceText(s, 80);
     static constexpr const wchar_t* kSuffixes[] = {
         L"hands-free ag audio",
         L"hands-free ag",
@@ -69,7 +80,7 @@ std::wstring CleanDeviceName(std::wstring s) {
             if (StripSuffixI(s, suf)) changed = true;
         }
     }
-    return s;
+    return SanitizeDeviceText(s, 64);
 }
 
 bool NamesMatchAudio(const std::wstring& devName, const std::wstring& audioEndpointName) {
@@ -78,7 +89,6 @@ bool NamesMatchAudio(const std::wstring& devName, const std::wstring& audioEndpo
     if (dev.size() < 4 || audio.size() < 4) return false;
     if (audio.find(dev) != std::wstring::npos || dev.find(audio) != std::wstring::npos) return true;
 
-    // Audio endpoints are typically formatted as "Headphones (Model Name)"
     const size_t open = audio.find(L'(');
     const size_t close = audio.rfind(L')');
     if (open != std::wstring::npos && close != std::wstring::npos && close > open + 4) {
@@ -96,7 +106,6 @@ DeviceKind ClassifyDevice(const std::wstring& name, const std::wstring& pnpClass
         return DeviceKind::Unknown;
     }
 
-    // Bluetooth Class of Device: Major 0x04 = Audio, 0x05 = Peripheral (0x80 mouse, 0x40 keyboard)
     if (cod != 0) {
         const uint32_t major = (cod >> 8) & 0x1Fu;
         if (major == 0x04u) return DeviceKind::Headphones;
@@ -141,7 +150,10 @@ void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const Devi
 
     DeviceEntry clean = entry;
     clean.name = CleanDeviceName(clean.name);
+    clean.containerId = SanitizeDeviceText(ToLower(clean.containerId), 48);
     const std::wstring normName = ToLower(clean.name);
+    clean.key = !clean.containerId.empty() ? clean.containerId : normName;
+    if (clean.key.empty()) return;
 
     auto& items = out[static_cast<size_t>(kind)].items;
     for (auto& existing : items) {
@@ -152,6 +164,7 @@ void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const Devi
             if (clean.connected) existing.connected = true;
             if (clean.charging) existing.charging = true;
             if (existing.name.empty() && !clean.name.empty()) existing.name = clean.name;
+            if (existing.key.empty()) existing.key = clean.key;
             return;
         }
     }

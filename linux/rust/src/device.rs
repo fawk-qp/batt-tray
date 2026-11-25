@@ -7,27 +7,45 @@ pub enum DeviceKind {
 }
 
 #[derive(Clone, Default)]
+pub struct DeviceEntry {
+    pub key: String,
+    pub name: String,
+    pub percent: i32,
+    pub charging: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct DeviceState {
     pub name: String,
     pub percent: i32,
     pub online: bool,
     pub charging: bool,
+    pub items: Vec<DeviceEntry>,
 }
 
 pub struct SlotSpec {
+    pub kind: DeviceKind,
     pub id: &'static str,
     pub label: &'static str,
     pub icon_name: &'static str,
 }
 
 pub const SLOT_SPECS: [SlotSpec; 3] = [
-    SlotSpec { id: "batt-tray-mouse",      label: "Мышь",       icon_name: "input-mouse-symbolic" },
-    SlotSpec { id: "batt-tray-keyboard",   label: "Клавиатура", icon_name: "input-keyboard-symbolic" },
-    SlotSpec { id: "batt-tray-headphones", label: "Наушники",   icon_name: "audio-headphones-symbolic" },
+    SlotSpec { kind: DeviceKind::Mouse,      id: "batt-tray-mouse",      label: "Мышь",       icon_name: "input-mouse-symbolic" },
+    SlotSpec { kind: DeviceKind::Keyboard,   id: "batt-tray-keyboard",   label: "Клавиатура", icon_name: "input-keyboard-symbolic" },
+    SlotSpec { kind: DeviceKind::Headphones, id: "batt-tray-headphones", label: "Наушники",   icon_name: "audio-headphones-symbolic" },
 ];
 
+pub fn sanitize_device_text(raw: &str, max_chars: usize) -> String {
+    raw.chars()
+        .filter(|&c| !c.is_control())
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub fn classify_device(name: &str, icon_hint: &str, cod: u32) -> DeviceKind {
-    // Bluetooth Class of Device: Major 0x04 = Audio, 0x05 = Peripheral (0x80 mouse, 0x40 keyboard)
     if cod != 0 {
         let major = (cod >> 8) & 0x1F;
         if major == 0x04 {
@@ -99,9 +117,25 @@ pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, name: Strin
     if kind == DeviceKind::Unknown || !(0..=100).contains(&percent) {
         return;
     }
+    let clean = sanitize_device_text(&name, 64);
+    let key = clean.to_lowercase();
+
     let dst = &mut out[kind as usize];
+    if !key.is_empty() {
+        if let Some(existing) = dst.items.iter_mut().find(|it| it.key == key) {
+            existing.charging |= charging;
+        } else {
+            dst.items.push(DeviceEntry {
+                key,
+                name: clean.clone(),
+                percent,
+                charging,
+            });
+        }
+    }
+
     if !dst.online {
-        dst.name = name.trim().to_string();
+        dst.name = clean;
         dst.percent = percent;
         dst.online = true;
         dst.charging = charging;

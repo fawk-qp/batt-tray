@@ -32,6 +32,9 @@ pub const SFD_CLOEXEC: c_int = 0o2000000;
 pub const LOCK_EX: c_int = 2;
 pub const LOCK_NB: c_int = 4;
 
+pub const PR_SET_DUMPABLE: c_int = 4;
+pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
+
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 pub const O_NOFOLLOW: c_int = 0o100000;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
@@ -96,6 +99,8 @@ extern "C" {
     pub fn sigaddset(set: *mut SigSet, sig: c_int) -> c_int;
     pub fn sigprocmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
     pub fn signalfd(fd: c_int, mask: *const SigSet, flags: c_int) -> c_int;
+    pub fn umask(mask: u32) -> u32;
+    pub fn prctl(option: c_int, ...) -> c_int;
 }
 
 #[link(name = "dbus-1")]

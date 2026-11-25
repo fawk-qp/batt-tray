@@ -1,5 +1,6 @@
 use crate::dbus_ffi::*;
-use crate::device::{DeviceState, SLOT_SPECS};
+use crate::device::{DeviceKind, DeviceState, SLOT_SPECS};
+use crate::history::DeviceHistory;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void};
 use std::ptr::{null, null_mut};
@@ -61,6 +62,12 @@ const MENU_XML: &str = concat!(
     "<method name='Introspect'><arg type='s' direction='out'/></method></interface></node>"
 );
 
+#[derive(Clone, PartialEq, Eq)]
+struct InactiveMenuRow {
+    key: String,
+    label: String,
+}
+
 #[derive(Clone)]
 struct SlotSnapshot {
     id: &'static str,
@@ -69,12 +76,14 @@ struct SlotSnapshot {
     tip_desc: String,
     label: String,
     menu_status: String,
+    inactive_menu: Vec<InactiveMenuRow>,
     overlay: String,
     status: String,
     menu_revision: u32,
 }
 
 struct TraySlot {
+    kind: DeviceKind,
     id: &'static str,
     label_prefix: &'static str,
     icon_name: &'static str,
@@ -84,6 +93,7 @@ struct TraySlot {
     tip_desc: String,
     label: String,
     menu_status: String,
+    inactive_menu: Vec<InactiveMenuRow>,
     overlay: String,
     status: String,
     menu_revision: u32,
@@ -98,6 +108,7 @@ impl TraySlot {
             tip_desc: self.tip_desc.clone(),
             label: self.label.clone(),
             menu_status: self.menu_status.clone(),
+            inactive_menu: self.inactive_menu.clone(),
             overlay: self.overlay.clone(),
             status: self.status.clone(),
             menu_revision: self.menu_revision,
@@ -119,6 +130,8 @@ struct SlotEmit {
 
 thread_local! {
     static SLOTS: RefCell<Vec<TraySlot>> = const { RefCell::new(Vec::new()) };
+    static STATES: RefCell<[DeviceState; 3]> = RefCell::new(Default::default());
+    static HISTORY: RefCell<DeviceHistory> = RefCell::new(DeviceHistory::default());
     static SCAN_DUE: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
@@ -163,6 +176,26 @@ pub fn clear_scan_due() {
 
 pub fn next_deadline(fallback: Instant) -> Instant {
     SCAN_DUE.with(|c| c.borrow().map_or(fallback, |t| t.min(fallback)))
+}
+
+fn build_inactive_menu(kind: DeviceKind, label_prefix: &str, active: &DeviceState) -> Vec<InactiveMenuRow> {
+    HISTORY.with(|h| {
+        h.borrow()
+            .get_inactive_for_kind(kind, &active.items)
+            .into_iter()
+            .take(10)
+            .map(|it| {
+                let d_name = if it.name.is_empty() { label_prefix } else { &it.name };
+                let lbl = format!(
+                    "○ {} — {}% ({})",
+                    d_name,
+                    it.percent,
+                    DeviceHistory::format_relative_time(it.last_seen_unix)
+                );
+                InactiveMenuRow { key: it.key, label: lbl }
+            })
+            .collect()
+    })
 }
 
 unsafe fn append_var_tooltip(it: *mut DBusMessageIter, s: &SlotSnapshot) {
@@ -210,8 +243,32 @@ unsafe fn append_menu_item_props(props: *mut DBusMessageIter, s: &SlotSnapshot, 
             append_dict_bool(props, "enabled", false);
             append_dict_bool(props, "visible", true);
         }
-        11 | 2 => {
+        11 | 21 | 23 | 2 => {
             append_dict_str(props, "type", "separator");
+            append_dict_bool(props, "visible", true);
+        }
+        20 => {
+            append_dict_str(props, "label", "История (неактивные)");
+            append_dict_str(props, "children-display", "submenu");
+            append_dict_bool(props, "enabled", true);
+            append_dict_bool(props, "visible", true);
+        }
+        22 => {
+            append_dict_str(props, "label", "Очистить историю");
+            append_dict_bool(props, "enabled", true);
+            append_dict_bool(props, "visible", true);
+        }
+        100..=199 => {
+            if let Some(row) = s.inactive_menu.get((id - 100) as usize) {
+                append_dict_str(props, "label", &row.label);
+                append_dict_str(props, "children-display", "submenu");
+                append_dict_bool(props, "enabled", true);
+                append_dict_bool(props, "visible", true);
+            }
+        }
+        200..=299 => {
+            append_dict_str(props, "label", "Удалить из истории");
+            append_dict_bool(props, "enabled", true);
             append_dict_bool(props, "visible", true);
         }
         1 => {
@@ -246,14 +303,71 @@ unsafe fn append_menu_item(parent: *mut DBusMessageIter, s: &SlotSnapshot, id: i
     dbus_message_iter_close_container(&mut st, &mut props);
     dbus_message_iter_open_container(&mut st, DBUS_TYPE_ARRAY, b"v\0".as_ptr() as *const c_char, &mut ch);
     if id == 0 {
-        for child_id in [10i32, 11, 1, 2, 3] {
-            append_menu_item(&mut ch, s, child_id, true);
+        append_menu_item(&mut ch, s, 10, true);
+        append_menu_item(&mut ch, s, 11, true);
+        if !s.inactive_menu.is_empty() {
+            append_menu_item(&mut ch, s, 20, true);
+            append_menu_item(&mut ch, s, 23, true);
+        }
+        append_menu_item(&mut ch, s, 1, true);
+        append_menu_item(&mut ch, s, 2, true);
+        append_menu_item(&mut ch, s, 3, true);
+    } else if id == 20 {
+        for j in 0..s.inactive_menu.len() {
+            append_menu_item(&mut ch, s, 100 + j as i32, true);
+        }
+        append_menu_item(&mut ch, s, 21, true);
+        append_menu_item(&mut ch, s, 22, true);
+    } else if (100..200).contains(&id) {
+        let idx = (id - 100) as usize;
+        if idx < s.inactive_menu.len() {
+            append_menu_item(&mut ch, s, 200 + idx as i32, true);
         }
     }
     dbus_message_iter_close_container(&mut st, &mut ch);
     dbus_message_iter_close_container(target, &mut st);
     if as_var {
         dbus_message_iter_close_container(parent, &mut v);
+    }
+}
+
+unsafe fn handle_history_action(slot_idx: usize, item_id: i32) {
+    let emit_info: Option<(*mut DBusConnection, u32)> = SLOTS.with(|s_cell| {
+        let mut slots = s_cell.borrow_mut();
+        let slot = slots.get_mut(slot_idx)?;
+        let changed = if item_id == 22 {
+            STATES.with(|st| {
+                let active_items = &st.borrow()[slot_idx].items;
+                HISTORY.with(|h| h.borrow_mut().clear_inactive_for_kind(slot.kind, active_items))
+            })
+        } else if (200..300).contains(&item_id) {
+            let idx = (item_id - 200) as usize;
+            if let Some(row) = slot.inactive_menu.get(idx) {
+                let key = row.key.clone();
+                HISTORY.with(|h| h.borrow_mut().remove_entry(slot.kind, &key))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if changed {
+            let next_menu = STATES.with(|st| {
+                let active = &st.borrow()[slot_idx];
+                build_inactive_menu(slot.kind, slot.label_prefix, active)
+            });
+            slot.inactive_menu = next_menu;
+            slot.menu_revision = slot.menu_revision.wrapping_add(1).max(1);
+            Some((slot.conn, slot.menu_revision))
+        } else {
+            None
+        }
+    });
+
+    if let Some((conn, rev)) = emit_info {
+        emit_layout_updated(conn, rev);
+        dbus_connection_flush(conn);
     }
 }
 
@@ -394,11 +508,24 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
         })
     } else if dbus_message_is_method_call(msg, b"com.canonical.dbusmenu\0".as_ptr() as *const c_char, b"GetGroupProperties\0".as_ptr() as *const c_char) != 0 {
         DbusMsg::new(dbus_message_new_method_return(msg)).map(|r| {
+            let mut ids: Vec<i32> = vec![10, 11];
+            if !snap.inactive_menu.is_empty() {
+                ids.push(20);
+                for j in 0..snap.inactive_menu.len() {
+                    ids.push(100 + j as i32);
+                    ids.push(200 + j as i32);
+                }
+                ids.push(21);
+                ids.push(22);
+                ids.push(23);
+            }
+            ids.extend_from_slice(&[1, 2, 3]);
+
             let mut it = zero_iter();
             let mut arr = zero_iter();
             dbus_message_iter_init_append(r.0, &mut it);
             dbus_message_iter_open_container(&mut it, DBUS_TYPE_ARRAY, b"(ia{sv})\0".as_ptr() as *const c_char, &mut arr);
-            for id in [10i32, 11, 1, 2, 3] {
+            for id in ids {
                 let mut st = zero_iter();
                 let mut props = zero_iter();
                 dbus_message_iter_open_container(&mut arr, DBUS_TYPE_STRUCT, null(), &mut st);
@@ -431,6 +558,8 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
                             schedule_scan(Duration::ZERO);
                         } else if id == 3 {
                             stop_running();
+                        } else if id == 22 || (200..300).contains(&id) {
+                            handle_history_action(idx, id);
                         }
                     }
                 }
@@ -529,9 +658,11 @@ fn compute_slot_update(slot: &mut TraySlot, dev: &DeviceState) -> SlotEmit {
         (title.clone(), String::new(), String::new(), title, String::new(), st.to_string())
     };
 
+    let new_inactive = build_inactive_menu(slot.kind, slot.label_prefix, dev);
+
     let tip_ch = new_title != slot.tip_title || new_desc != slot.tip_desc;
     let lbl_ch = new_lbl != slot.label;
-    let menu_ch = new_menu != slot.menu_status;
+    let menu_ch = new_menu != slot.menu_status || new_inactive != slot.inactive_menu;
     let ov_ch = new_ov != slot.overlay;
     let st_ch = new_st != slot.status;
 
@@ -539,6 +670,7 @@ fn compute_slot_update(slot: &mut TraySlot, dev: &DeviceState) -> SlotEmit {
     slot.tip_desc = new_desc;
     slot.label = new_lbl.clone();
     slot.menu_status = new_menu;
+    slot.inactive_menu = new_inactive;
     slot.overlay = new_ov;
     slot.status = new_st.clone();
     if menu_ch {
@@ -579,8 +711,10 @@ unsafe extern "C" fn watcher_filter(_: *mut DBusConnection, msg: *mut DBusMessag
     DBUS_HANDLER_RESULT_NOT_YET_HANDLED
 }
 
-pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]> {
+pub unsafe fn init_slots(hide_offline: bool, demo_mode: bool) -> Option<[*mut DBusConnection; 3]> {
     HIDE_OFFLINE.store(hide_offline, Ordering::Relaxed);
+    HISTORY.with(|h| h.borrow_mut().load(demo_mode));
+
     let pid = getpid();
     let mut err = DbusErr::new();
     let mut init_slots: Vec<TraySlot> = Vec::with_capacity(3);
@@ -615,6 +749,7 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
         }
 
         let mut slot = TraySlot {
+            kind: spec.kind,
             id: spec.id,
             label_prefix: spec.label,
             icon_name: spec.icon_name,
@@ -624,6 +759,7 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
             tip_desc: String::new(),
             label: String::new(),
             menu_status: String::new(),
+            inactive_menu: Vec::new(),
             overlay: String::new(),
             status: "Active".to_string(),
             menu_revision: 1,
@@ -639,6 +775,9 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
 }
 
 pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
+    STATES.with(|st| *st.borrow_mut() = found.clone());
+    HISTORY.with(|h| h.borrow_mut().sync_active(found));
+
     let updates: Vec<SlotEmit> = SLOTS.with(|s| {
         let mut slots = s.borrow_mut();
         (0..3)
@@ -647,6 +786,7 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
     });
 
     for u in updates {
+        let any = u.tip_ch || u.lbl_ch || u.menu_ch || u.ov_ch || u.st_ch;
         if u.tip_ch {
             emit_sig(u.conn, "NewTitle", None);
             emit_sig(u.conn, "NewToolTip", None);
@@ -664,7 +804,9 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
         if u.st_ch {
             emit_sig(u.conn, "NewStatus", Some(&u.status));
         }
-        dbus_connection_flush(u.conn);
+        if any {
+            dbus_connection_flush(u.conn);
+        }
     }
 }
 

@@ -37,8 +37,52 @@ std::string Trim(std::string s) {
     return s.substr(i);
 }
 
+// UTF-8 safe sanitizer: strips control chars (<0x20, 0x7F) and invalid byte sequences so D-Bus never rejects strings.
+std::string SanitizeDeviceText(const std::string& s, size_t maxChars) {
+    std::string out;
+    out.reserve(s.size());
+    size_t chars = 0;
+    size_t i = 0;
+    while (i < s.size() && chars < maxChars) {
+        const unsigned char b = static_cast<unsigned char>(s[i]);
+        if (b < 0x20u || b == 0x7Fu) {
+            ++i;
+            continue;
+        }
+        if ((b & 0x80u) == 0u) {
+            out.push_back(static_cast<char>(b));
+            ++i;
+            ++chars;
+            continue;
+        }
+        size_t len = 0;
+        if ((b & 0xE0u) == 0xC0u && b >= 0xC2u) len = 2;
+        else if ((b & 0xF0u) == 0xE0u) len = 3;
+        else if ((b & 0xF8u) == 0xF0u && b <= 0xF4u) len = 4;
+        else {
+            ++i;
+            continue;
+        }
+        if (i + len > s.size()) break;
+        bool valid = true;
+        for (size_t k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0u) != 0x80u) {
+                valid = false;
+                break;
+            }
+        }
+        if (!valid) {
+            ++i;
+            continue;
+        }
+        out.append(s, i, len);
+        i += len;
+        ++chars;
+    }
+    return Trim(std::move(out));
+}
+
 DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint, uint32_t cod) {
-    // Bluetooth Class of Device: Major 0x04 = Audio, 0x05 = Peripheral (0x80 mouse, 0x40 keyboard)
     if (cod != 0) {
         const uint32_t major = (cod >> 8) & 0x1Fu;
         if (major == 0x04u) return DeviceKind::Headphones;
@@ -85,9 +129,26 @@ DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint, 
 
 void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const std::string& name, int percent, bool charging) {
     if (kind == DeviceKind::Unknown || percent < 0 || percent > 100) return;
+    const std::string clean = SanitizeDeviceText(name, 64);
+    const std::string key = ToLower(clean);
+
     auto& dst = out[static_cast<size_t>(kind)];
+    if (!key.empty()) {
+        bool exists = false;
+        for (auto& item : dst.items) {
+            if (item.key == key) {
+                if (charging) item.charging = true;
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            dst.items.push_back({key, clean, percent, charging});
+        }
+    }
+
     if (!dst.online) {
-        dst.name = Trim(name);
+        dst.name = clean;
         dst.percent = percent;
         dst.online = true;
         dst.charging = charging;

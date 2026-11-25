@@ -41,6 +41,8 @@ pub const WM_DEVICECHANGE: u32 = 0x0219;
 pub const WM_DPICHANGED: u32 = 0x02E0;
 pub const WM_APP: u32 = 0x8000;
 
+pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: *mut c_void = -4isize as *mut c_void;
+
 pub const DBT_DEVNODES_CHANGED: usize = 0x0007;
 pub const DBT_DEVICEARRIVAL: usize = 0x8000;
 pub const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
@@ -65,8 +67,10 @@ pub const NIF_ICON: u32 = 0x0000_0002;
 pub const NIF_TIP: u32 = 0x0000_0004;
 
 pub const MF_STRING: u32 = 0x0000_0000;
+pub const MF_GRAYED: u32 = 0x0000_0001;
 pub const MF_UNCHECKED: u32 = 0x0000_0000;
 pub const MF_CHECKED: u32 = 0x0000_0008;
+pub const MF_POPUP: u32 = 0x0000_0010;
 pub const MF_SEPARATOR: u32 = 0x0000_0800;
 pub const TPM_LEFTALIGN: u32 = 0x0000;
 pub const TPM_RIGHTBUTTON: u32 = 0x0002;
@@ -82,12 +86,15 @@ pub const WAIT_OBJECT_0: u32 = 0x0000_0000;
 pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
 pub const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
-pub const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: *mut c_void = -4isize as *mut c_void;
 pub const GENERIC_READ: u32 = 0x8000_0000;
 pub const FILE_SHARE_READ: u32 = 0x0000_0001;
 pub const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 pub const OPEN_EXISTING: u32 = 3;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+pub const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
 
 pub const DIGCF_PRESENT: u32 = 0x0000_0002;
 pub const DIGCF_ALLCLASSES: u32 = 0x0000_0004;
@@ -95,9 +102,9 @@ pub const DIGCF_DEVICEINTERFACE: u32 = 0x0000_0010;
 
 pub const DEVPROP_TYPE_BYTE: u32 = 0x0000_0003;
 pub const DEVPROP_TYPE_UINT32: u32 = 0x0000_0007;
-pub const DEVPROP_TYPE_STRING: u32 = 0x0000_0012;
 pub const DEVPROP_TYPE_GUID: u32 = 0x0000_000D;
 pub const DEVPROP_TYPE_BOOLEAN: u32 = 0x0000_0011;
+pub const DEVPROP_TYPE_STRING: u32 = 0x0000_0012;
 
 pub const BLUETOOTH_GATT_FLAG_NONE: u32 = 0x0000_0000;
 
@@ -251,7 +258,6 @@ pub struct SP_DEVICE_INTERFACE_DATA {
     pub Reserved: usize,
 }
 
-// On x64 Windows, SetupAPI uses default 8-byte packing -> cbSize = 8, DevicePath offset = 4.
 #[repr(C)]
 pub struct SP_DEVICE_INTERFACE_DETAIL_DATA_W {
     pub cbSize: u32,
@@ -290,7 +296,6 @@ pub struct BTH_LE_GATT_CHARACTERISTIC_VALUE {
 }
 
 #[repr(C)]
-#[derive(Default)]
 pub struct PROPVARIANT {
     pub vt: u16,
     pub r1: u16,
@@ -298,6 +303,12 @@ pub struct PROPVARIANT {
     pub r3: u16,
     pub ptr: *mut c_void,
     pub pad: usize,
+}
+
+impl Default for PROPVARIANT {
+    fn default() -> Self {
+        Self { vt: 0, r1: 0, r2: 0, r3: 0, ptr: std::ptr::null_mut(), pad: 0 }
+    }
 }
 
 #[repr(C)]
@@ -343,6 +354,18 @@ pub struct IMMDeviceEnumeratorVtbl {
     pub GetDefaultAudioEndpoint: unsafe extern "system" fn(*mut IMMDeviceEnumerator, u32, u32, *mut *mut IMMDevice) -> HRESULT,
 }
 
+#[repr(C)]
+pub struct MitigationFlagsPolicy {
+    pub flags: u32,
+}
+
+#[repr(C)]
+pub struct PowerThrottlingPolicy {
+    pub version: u32,
+    pub control_mask: u32,
+    pub state_mask: u32,
+}
+
 pub type FnBluetoothGattGetCharacteristics = unsafe extern "system" fn(
     HANDLE,
     *mut c_void,
@@ -363,6 +386,26 @@ pub type FnBluetoothGattGetCharacteristicValue = unsafe extern "system" fn(
 
 #[link(name = "kernel32")]
 extern "system" {
+    pub fn GetCurrentProcess() -> HANDLE;
+    pub fn SetPriorityClass(hProcess: HANDLE, dwPriorityClass: u32) -> BOOL;
+    pub fn SetProcessInformation(
+        hProcess: HANDLE,
+        ProcessInformationClass: i32,
+        ProcessInformation: *const c_void,
+        ProcessInformationSize: u32,
+    ) -> BOOL;
+    pub fn SetProcessWorkingSetSizeEx(
+        hProcess: HANDLE,
+        dwMinimumWorkingSetSize: usize,
+        dwMaximumWorkingSetSize: usize,
+        Flags: u32,
+    ) -> BOOL;
+    pub fn SetDefaultDllDirectories(DirectoryFlags: u32) -> BOOL;
+    pub fn SetProcessMitigationPolicy(
+        MitigationPolicy: i32,
+        lpBuffer: *const c_void,
+        dwLength: usize,
+    ) -> BOOL;
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
     pub fn GetModuleFileNameW(hModule: HMODULE, lpFilename: *mut u16, nSize: u32) -> u32;
     pub fn CreateMutexW(lpAttr: *mut c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
@@ -387,6 +430,11 @@ extern "system" {
 
 #[link(name = "user32")]
 extern "system" {
+    pub fn SetProcessDpiAwarenessContext(value: *mut c_void) -> BOOL;
+    pub fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
+    pub fn GetDpiForWindow(hwnd: HWND) -> u32;
+    pub fn GetDpiForSystem() -> u32;
+    pub fn GetSystemMetricsForDpi(nIndex: i32, dpi: u32) -> i32;
     pub fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) -> u16;
     pub fn CreateWindowExW(
         dwExStyle: u32,
@@ -410,14 +458,14 @@ extern "system" {
     pub fn PostMessageW(hWnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) -> BOOL;
     pub fn PostQuitMessage(nExitCode: i32);
     pub fn RegisterWindowMessageW(lpString: *const u16) -> u32;
-    pub fn SetTimer(hWnd: HWND, nIDEvent: usize, uElapse: u32, lpTimerFunc: *const c_void) -> usize;
+    pub fn SetCoalescableTimer(
+        hWnd: HWND,
+        nIDEvent: usize,
+        uElapse: u32,
+        lpTimerFunc: *const c_void,
+        uToleranceDelay: u32,
+    ) -> usize;
     pub fn KillTimer(hWnd: HWND, uIDEvent: usize) -> BOOL;
-    pub fn GetSystemMetrics(nIndex: i32) -> i32;
-    pub fn SetProcessDpiAwarenessContext(value: *mut c_void) -> BOOL;
-    pub fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> HWND;
-    pub fn GetDpiForWindow(hwnd: HWND) -> u32;
-    pub fn GetDpiForSystem() -> u32;
-    pub fn GetSystemMetricsForDpi(nIndex: i32, dpi: u32) -> i32;
     pub fn GetDC(hWnd: HWND) -> HDC;
     pub fn ReleaseDC(hWnd: HWND, hDC: HDC) -> i32;
     pub fn DrawTextW(hdc: HDC, lpchText: *const u16, cchText: i32, lprc: *mut RECT, format: u32) -> i32;
@@ -451,14 +499,6 @@ extern "system" {
     pub fn CreateBitmap(nWidth: i32, nHeight: i32, nPlanes: u32, nBitCount: u32, lpBits: *const c_void) -> HBITMAP;
     pub fn GdiFlush() -> BOOL;
     pub fn EnumFontFamiliesExW(hdc: HDC, lpLogfont: *mut LOGFONTW, lpProc: FONTENUMPROCW, lParam: LPARAM, dwFlags: u32) -> i32;
-}
-
-#[link(name = "ole32")]
-extern "system" {
-    pub fn CoInitializeEx(pvReserved: *mut c_void, dwCoInit: u32) -> HRESULT;
-    pub fn CoUninitialize();
-    pub fn CoCreateInstance(rclsid: *const GUID, pUnkOuter: *mut c_void, dwClsContext: u32, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT;
-    pub fn PropVariantClear(pvar: *mut PROPVARIANT) -> HRESULT;
 }
 
 #[link(name = "shell32")]
@@ -513,6 +553,20 @@ extern "system" {
         DeviceInfoData: *mut SP_DEVINFO_DATA,
     ) -> BOOL;
     pub fn SetupDiDestroyDeviceInfoList(DeviceInfoSet: HDEVINFO) -> BOOL;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    pub fn CoInitializeEx(pvReserved: *mut c_void, dwCoInit: u32) -> HRESULT;
+    pub fn CoUninitialize();
+    pub fn CoCreateInstance(
+        rclsid: *const GUID,
+        pUnkOuter: *mut c_void,
+        dwClsContext: u32,
+        riid: *const GUID,
+        ppv: *mut *mut c_void,
+    ) -> HRESULT;
+    pub fn PropVariantClear(pvar: *mut PROPVARIANT) -> HRESULT;
 }
 
 pub fn to_wide(s: &str) -> Vec<u16> {

@@ -8,6 +8,7 @@ pub enum DeviceKind {
 
 #[derive(Clone, Default)]
 pub struct DeviceEntry {
+    pub key: String,
     pub name: String,
     pub container_id: String,
     pub percent: i32,
@@ -38,8 +39,17 @@ pub const SLOT_SPECS: [SlotSpec; 3] = [
     SlotSpec { kind: DeviceKind::Headphones, uid: 1003, label: "Наушники",   glyph: 0xE7F6 },
 ];
 
+pub fn sanitize_device_text(raw: &str, max_chars: usize) -> String {
+    raw.chars()
+        .filter(|&c| !c.is_control())
+        .take(max_chars)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub fn clean_device_name(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
+    let mut s = sanitize_device_text(raw, 80);
     const SUFFIXES: [&str; 6] = [
         "hands-free ag audio",
         "hands-free ag",
@@ -64,7 +74,7 @@ pub fn clean_device_name(raw: &str) -> String {
             }
         }
     }
-    s
+    sanitize_device_text(&s, 64)
 }
 
 pub fn names_match_audio(dev_name: &str, audio_endpoint_name: &str) -> bool {
@@ -160,7 +170,16 @@ pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, mut entry: 
         return;
     }
     entry.name = clean_device_name(&entry.name);
+    entry.container_id = sanitize_device_text(&entry.container_id.to_lowercase(), 48);
     let norm = entry.name.to_lowercase();
+    entry.key = if !entry.container_id.is_empty() {
+        entry.container_id.clone()
+    } else {
+        norm.clone()
+    };
+    if entry.key.is_empty() {
+        return;
+    }
 
     let items = &mut out[kind as usize].items;
     for existing in items.iter_mut() {
@@ -172,6 +191,9 @@ pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, mut entry: 
             existing.charging |= entry.charging;
             if existing.name.is_empty() && !entry.name.is_empty() {
                 existing.name = entry.name;
+            }
+            if existing.key.is_empty() {
+                existing.key = entry.key;
             }
             return;
         }

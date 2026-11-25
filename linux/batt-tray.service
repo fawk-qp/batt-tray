@@ -6,6 +6,10 @@ After=graphical-session.target
 ExecStart=%h/.local/bin/batt-tray-linux-cpp
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+UMask=0077
 
 [Install]
 WantedBy=graphical-session.target

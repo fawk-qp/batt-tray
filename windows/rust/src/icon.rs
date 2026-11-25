@@ -31,7 +31,7 @@ fn pick_icon_font() -> &'static str {
     })
 }
 
-fn get_taskbar_icon_size() -> i32 {
+pub fn get_taskbar_icon_size() -> i32 {
     unsafe {
         let cls = to_wide("Shell_TrayWnd");
         let tb = FindWindowW(cls.as_ptr(), null());
@@ -122,7 +122,6 @@ pub fn create_battery_tray_icon(glyph: u16, state: &DeviceState, light_theme: bo
             return null_mut();
         }
 
-        // 4x supersampled DIB for crisp glyph rasterization
         let hi_bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -180,7 +179,6 @@ pub fn create_battery_tray_icon(glyph: u16, state: &DeviceState, light_theme: bo
         SelectObject(mem_dc, old_bmp);
         DeleteDC(mem_dc);
 
-        // Final target DIB at exact taskbar DPI
         let out_bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -217,7 +215,6 @@ pub fn create_battery_tray_icon(glyph: u16, state: &DeviceState, light_theme: bo
             0.42
         };
 
-        // Gamma-correct 4x4 box downsample from supersampled DIB
         let hi_w = hi_size as usize;
         for y in 0..(size as usize) {
             for x in 0..(size as usize) {
@@ -238,7 +235,6 @@ pub fn create_battery_tray_icon(glyph: u16, state: &DeviceState, light_theme: bo
         }
         DeleteObject(hi_bmp);
 
-        // Analytical SDF anti-aliased Windows 11 pill indicator
         if state.online && state.percent >= 0 {
             let bar_w = (f_size - 2.0 * pad_x).max(4.0);
             let r = bar_h * 0.5;

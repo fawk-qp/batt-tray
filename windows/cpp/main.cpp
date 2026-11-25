@@ -16,7 +16,8 @@ namespace {
 
 constexpr UINT_PTR kTimerDebounce = 1;
 constexpr UINT kDebounceMs = 2000;
-constexpr DWORD kPollIntervalMs = 60000;
+constexpr UINT kCoalesceToleranceMs = 500;
+constexpr DWORD kPollIntervalMs = 120000;
 
 constexpr GUID kClsidMMDeviceEnumerator = {
     0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}
@@ -30,6 +31,41 @@ constexpr GUID kIidIMMNotificationClient = {
 constexpr GUID kIidIUnknown = {
     0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}
 };
+
+struct MitigationFlagsPolicy {
+    DWORD Flags;
+};
+
+struct PowerThrottlingPolicy {
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+};
+
+void ApplyProcessHardeningAndEcoMode() {
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    // Block AppInit_DLLs / extension points (6), non-system fonts (9), remote/low-IL/non-System32 DLLs (10), invalid handles (3)
+    MitigationFlagsPolicy extPolicy{0x1u};
+    SetProcessMitigationPolicy(static_cast<PROCESS_MITIGATION_POLICY>(6), &extPolicy, sizeof(extPolicy));
+
+    MitigationFlagsPolicy fontPolicy{0x1u};
+    SetProcessMitigationPolicy(static_cast<PROCESS_MITIGATION_POLICY>(9), &fontPolicy, sizeof(fontPolicy));
+
+    MitigationFlagsPolicy imgPolicy{0x1u | 0x2u | 0x4u};
+    SetProcessMitigationPolicy(static_cast<PROCESS_MITIGATION_POLICY>(10), &imgPolicy, sizeof(imgPolicy));
+
+    MitigationFlagsPolicy handlePolicy{0x1u | 0x2u};
+    SetProcessMitigationPolicy(static_cast<PROCESS_MITIGATION_POLICY>(3), &handlePolicy, sizeof(handlePolicy));
+
+    SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS);
+    PowerThrottlingPolicy eco{1u, 1u, 1u};
+    SetProcessInformation(GetCurrentProcess(), static_cast<PROCESS_INFORMATION_CLASS>(4), &eco, sizeof(eco));
+}
+
+void TrimIdleWorkingSet() {
+    SetProcessWorkingSetSizeEx(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1), 0);
+}
 
 class AudioChangeClient final : public IMMNotificationClient {
 public:
@@ -137,13 +173,14 @@ void WorkerLoop(HWND hwnd, AppContext* app) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (g_app && g_app->msgTaskbarCreated != 0 && msg == g_app->msgTaskbarCreated) {
         g_app->tray.ReaddIcons();
+        TrimIdleWorkingSet();
         return 0;
     }
 
     switch (msg) {
         case WM_APP_TRAY:
             if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
-                g_app->tray.ShowContextMenu(hwnd);
+                g_app->tray.ShowContextMenu(hwnd, static_cast<UINT>(wParam));
             }
             return 0;
 
@@ -153,12 +190,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::lock_guard<std::mutex> lock(g_app->stateMtx);
                 snapshot = g_app->pendingStates;
             }
-            g_app->tray.Update(snapshot);
+            if (g_app->tray.Update(snapshot)) {
+                TrimIdleWorkingSet();
+            }
             return 0;
         }
 
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
+        case WM_COMMAND: {
+            const UINT cmd = LOWORD(wParam);
+            switch (cmd) {
                 case IDM_REFRESH:
                     if (g_app->scanEvent) SetEvent(g_app->scanEvent);
                     return 0;
@@ -169,13 +209,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DestroyWindow(hwnd);
                     return 0;
                 default:
+                    if (cmd >= IDM_HIST_CLEAR) {
+                        g_app->tray.HandleMenuCommand(cmd);
+                        return 0;
+                    }
                     break;
             }
             break;
+        }
 
         case WM_DEVICECHANGE:
             if (wParam == DBT_DEVNODES_CHANGED || wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) {
-                SetTimer(hwnd, kTimerDebounce, kDebounceMs, nullptr);
+                SetCoalescableTimer(hwnd, kTimerDebounce, kDebounceMs, nullptr, kCoalesceToleranceMs);
             }
             return 0;
 
@@ -189,12 +234,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_SETTINGCHANGE:
             if (lParam && std::wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0) {
                 g_app->tray.RefreshTheme();
+                TrimIdleWorkingSet();
             }
             return 0;
 
         case WM_DPICHANGED:
         case WM_DISPLAYCHANGE:
             g_app->tray.ReaddIcons();
+            TrimIdleWorkingSet();
             return 0;
 
         case WM_DESTROY:
@@ -216,6 +263,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    ApplyProcessHardeningAndEcoMode();
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
@@ -259,6 +307,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     }
 
     app.tray.Init(hwnd);
+    TrimIdleWorkingSet();
     app.worker = std::thread(WorkerLoop, hwnd, &app);
 
     MSG msg{};
