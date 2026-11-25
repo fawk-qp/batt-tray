@@ -43,6 +43,14 @@ int AcquireInstanceLock() {
     return fd;
 }
 
+std::array<DeviceState, 3> BuildDemoStates() {
+    std::array<DeviceState, 3> demo{};
+    demo[0] = {"Logitech G Pro X Superlight", 78, true, false};
+    demo[1] = {"Keychron K2", 42, true, true};
+    demo[2] = {"HUAWEI FreeBuds Pro 2", 18, true, false};
+    return demo;
+}
+
 DBusHandlerResult SystemSignalFilter(DBusConnection*, DBusMessage* msg, void* data) {
     if (dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_SIGNAL) {
         const char* iface = dbus_message_get_interface(msg);
@@ -58,8 +66,10 @@ DBusHandlerResult SystemSignalFilter(DBusConnection*, DBusMessage* msg, void* da
 
 int main(int argc, char** argv) {
     bool hideOffline = false;
+    bool demoMode = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--hide-offline") == 0) hideOffline = true;
+        else if (std::strcmp(argv[i], "--demo") == 0) demoMode = true;
     }
 
     FdGuard lockFd(AcquireInstanceLock());
@@ -74,15 +84,18 @@ int main(int argc, char** argv) {
 
     ControlState ctrl{};
 
-    DBusError err;
-    dbus_error_init(&err);
-    DBusConnection* sysBus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &err);
-    dbus_error_free(&err);
-    if (sysBus) {
-        dbus_connection_set_exit_on_disconnect(sysBus, FALSE);
-        dbus_bus_add_match(sysBus, "type='signal',sender='org.freedesktop.UPower'", nullptr);
-        dbus_bus_add_match(sysBus, "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties'", nullptr);
-        dbus_connection_add_filter(sysBus, SystemSignalFilter, &ctrl, nullptr);
+    DBusConnection* sysBus = nullptr;
+    if (!demoMode) {
+        DBusError err;
+        dbus_error_init(&err);
+        sysBus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &err);
+        dbus_error_free(&err);
+        if (sysBus) {
+            dbus_connection_set_exit_on_disconnect(sysBus, FALSE);
+            dbus_bus_add_match(sysBus, "type='signal',sender='org.freedesktop.UPower'", nullptr);
+            dbus_bus_add_match(sysBus, "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties'", nullptr);
+            dbus_connection_add_filter(sysBus, SystemSignalFilter, &ctrl, nullptr);
+        }
     }
 
     SniManager sni;
@@ -100,7 +113,7 @@ int main(int argc, char** argv) {
         if ((ctrl.scanDueMs >= 0 && now >= ctrl.scanDueMs) || now >= nextPeriodicMs) {
             ctrl.scanDueMs = -1;
             nextPeriodicMs = now + kPollFallbackMs;
-            sni.UpdateAll(ScanAllDevices(sysBus));
+            sni.UpdateAll(demoMode ? BuildDemoStates() : ScanAllDevices(sysBus));
         }
 
         pollfd fds[5]{};

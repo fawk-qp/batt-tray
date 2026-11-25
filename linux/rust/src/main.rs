@@ -4,6 +4,7 @@ mod scanner;
 mod sni;
 
 use dbus_ffi::*;
+use device::DeviceState;
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::OpenOptionsExt;
@@ -36,6 +37,14 @@ fn acquire_lock() -> Result<Option<File>, ()> {
     Ok(Some(file))
 }
 
+fn build_demo_states() -> [DeviceState; 3] {
+    [
+        DeviceState { name: "Logitech G Pro X Superlight".into(), percent: 78, online: true, charging: false },
+        DeviceState { name: "Keychron K2".into(), percent: 42, online: true, charging: true },
+        DeviceState { name: "HUAWEI FreeBuds Pro 2".into(), percent: 18, online: true, charging: false },
+    ]
+}
+
 unsafe extern "C" fn sys_filter(_: *mut DBusConnection, msg: *mut DBusMessage, _: *mut c_void) -> c_int {
     if dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_SIGNAL {
         let p = dbus_message_get_interface(msg);
@@ -50,7 +59,16 @@ unsafe extern "C" fn sys_filter(_: *mut DBusConnection, msg: *mut DBusMessage, _
 }
 
 fn main() {
-    let hide_offline = std::env::args().skip(1).any(|a| a == "--hide-offline");
+    let mut hide_offline = false;
+    let mut demo_mode = false;
+    for arg in std::env::args().skip(1) {
+        if arg == "--hide-offline" {
+            hide_offline = true;
+        } else if arg == "--demo" {
+            demo_mode = true;
+        }
+    }
+
     let Ok(_lock_file) = acquire_lock() else {
         return;
     };
@@ -63,13 +81,16 @@ fn main() {
         sigprocmask(SIG_BLOCK, &sig_mask, null_mut());
         let sig_fd = FdGuard(signalfd(-1, &sig_mask, SFD_NONBLOCK | SFD_CLOEXEC));
 
-        let mut err = DbusErr::new();
-        let sys_bus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &mut err.0);
-        if !sys_bus.is_null() {
-            dbus_connection_set_exit_on_disconnect(sys_bus, 0);
-            dbus_bus_add_match(sys_bus, b"type='signal',sender='org.freedesktop.UPower'\0".as_ptr() as *const c_char, null_mut());
-            dbus_bus_add_match(sys_bus, b"type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties'\0".as_ptr() as *const c_char, null_mut());
-            dbus_connection_add_filter(sys_bus, sys_filter, null_mut(), None);
+        let mut sys_bus: *mut DBusConnection = null_mut();
+        if !demo_mode {
+            let mut err = DbusErr::new();
+            sys_bus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &mut err.0);
+            if !sys_bus.is_null() {
+                dbus_connection_set_exit_on_disconnect(sys_bus, 0);
+                dbus_bus_add_match(sys_bus, b"type='signal',sender='org.freedesktop.UPower'\0".as_ptr() as *const c_char, null_mut());
+                dbus_bus_add_match(sys_bus, b"type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties'\0".as_ptr() as *const c_char, null_mut());
+                dbus_connection_add_filter(sys_bus, sys_filter, null_mut(), None);
+            }
         }
 
         let Some(slot_conns) = sni::init_slots(hide_offline) else {
@@ -88,7 +109,11 @@ fn main() {
             if sni::is_scan_due(now) || now >= next_periodic {
                 sni::clear_scan_due();
                 next_periodic = now + POLL_FALLBACK;
-                let found = scanner::scan_all_devices(sys_bus);
+                let found = if demo_mode {
+                    build_demo_states()
+                } else {
+                    scanner::scan_all_devices(sys_bus)
+                };
                 sni::update_all_slots(&found);
             }
 

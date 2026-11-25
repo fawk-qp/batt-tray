@@ -42,12 +42,16 @@ constexpr const char* kSniXml =
     "<property name='ToolTip' type='(sa(iiay)ss)' access='read'/>"
     "<property name='ItemIsMenu' type='b' access='read'/>"
     "<property name='Menu' type='o' access='read'/>"
+    "<property name='XAyatanaLabel' type='s' access='read'/>"
+    "<property name='XAyatanaLabelGuide' type='s' access='read'/>"
+    "<property name='XAyatanaOrderingIndex' type='u' access='read'/>"
     "<method name='ContextMenu'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
     "<method name='Activate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
     "<method name='SecondaryActivate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>"
     "<method name='Scroll'><arg type='i' direction='in'/><arg type='s' direction='in'/></method>"
     "<signal name='NewTitle'/><signal name='NewIcon'/><signal name='NewOverlayIcon'/>"
     "<signal name='NewToolTip'/><signal name='NewStatus'><arg type='s'/></signal>"
+    "<signal name='XAyatanaNewLabel'><arg type='s'/><arg type='s'/></signal>"
     "</interface><interface name='org.freedesktop.DBus.Properties'>"
     "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='out'/></method>"
     "<method name='GetAll'><arg type='s' direction='in'/><arg type='a{sv}' direction='out'/></method>"
@@ -64,6 +68,7 @@ constexpr const char* kMenuXml =
     "<method name='GetGroupProperties'><arg type='ai' direction='in'/><arg type='as' direction='in'/><arg type='a(ia{sv})' direction='out'/></method>"
     "<method name='Event'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='in'/><arg type='u' direction='in'/></method>"
     "<method name='AboutToShow'><arg type='i' direction='in'/><arg type='b' direction='out'/></method>"
+    "<signal name='LayoutUpdated'><arg type='u'/><arg type='i'/></signal>"
     "</interface><interface name='org.freedesktop.DBus.Properties'>"
     "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='out'/></method>"
     "<method name='GetAll'><arg type='s' direction='in'/><arg type='a{sv}' direction='out'/></method>"
@@ -141,25 +146,49 @@ void AppendDictBool(DBusMessageIter* dict, const char* k, bool val) {
 }
 
 bool AppendSniProp(DBusMessageIter* it, const SniManager::Slot& s, const char* prop) {
-    if (std::strcmp(prop, "Category") == 0)            { AppendVariantStr(it, "Hardware"); return true; }
-    if (std::strcmp(prop, "Id") == 0)                  { AppendVariantStr(it, s.spec->id); return true; }
-    if (std::strcmp(prop, "Title") == 0)               { AppendVariantStr(it, s.tipTitle.c_str()); return true; }
-    if (std::strcmp(prop, "Status") == 0)              { AppendVariantStr(it, s.status.c_str()); return true; }
-    if (std::strcmp(prop, "WindowId") == 0)            { AppendVariantU32(it, 0); return true; }
-    if (std::strcmp(prop, "IconName") == 0)            { AppendVariantStr(it, s.spec->iconName); return true; }
-    if (std::strcmp(prop, "OverlayIconName") == 0)     { AppendVariantStr(it, s.overlay.c_str()); return true; }
-    if (std::strcmp(prop, "IconPixmap") == 0)          { AppendVariantEmptyPixmaps(it); return true; }
-    if (std::strcmp(prop, "OverlayIconPixmap") == 0)   { AppendVariantEmptyPixmaps(it); return true; }
-    if (std::strcmp(prop, "AttentionIconName") == 0)   { AppendVariantStr(it, ""); return true; }
-    if (std::strcmp(prop, "AttentionIconPixmap") == 0) { AppendVariantEmptyPixmaps(it); return true; }
-    if (std::strcmp(prop, "AttentionMovieName") == 0)  { AppendVariantStr(it, ""); return true; }
-    if (std::strcmp(prop, "ToolTip") == 0)             { AppendVariantToolTip(it, s); return true; }
-    if (std::strcmp(prop, "ItemIsMenu") == 0)          { AppendVariantBool(it, false); return true; }
-    if (std::strcmp(prop, "Menu") == 0)                { AppendVariantObjPath(it, "/MenuBar"); return true; }
+    if (std::strcmp(prop, "Category") == 0)              { AppendVariantStr(it, "Hardware"); return true; }
+    if (std::strcmp(prop, "Id") == 0)                    { AppendVariantStr(it, s.spec->id); return true; }
+    if (std::strcmp(prop, "Title") == 0)                 { AppendVariantStr(it, s.tipTitle.c_str()); return true; }
+    if (std::strcmp(prop, "Status") == 0)                { AppendVariantStr(it, s.status.c_str()); return true; }
+    if (std::strcmp(prop, "WindowId") == 0)              { AppendVariantU32(it, 0); return true; }
+    if (std::strcmp(prop, "IconName") == 0)              { AppendVariantStr(it, s.spec->iconName); return true; }
+    if (std::strcmp(prop, "OverlayIconName") == 0)       { AppendVariantStr(it, s.overlay.c_str()); return true; }
+    if (std::strcmp(prop, "IconPixmap") == 0)            { AppendVariantEmptyPixmaps(it); return true; }
+    if (std::strcmp(prop, "OverlayIconPixmap") == 0)     { AppendVariantEmptyPixmaps(it); return true; }
+    if (std::strcmp(prop, "AttentionIconName") == 0)     { AppendVariantStr(it, ""); return true; }
+    if (std::strcmp(prop, "AttentionIconPixmap") == 0)   { AppendVariantEmptyPixmaps(it); return true; }
+    if (std::strcmp(prop, "AttentionMovieName") == 0)    { AppendVariantStr(it, ""); return true; }
+    if (std::strcmp(prop, "ToolTip") == 0)               { AppendVariantToolTip(it, s); return true; }
+    if (std::strcmp(prop, "ItemIsMenu") == 0)            { AppendVariantBool(it, false); return true; }
+    if (std::strcmp(prop, "Menu") == 0)                  { AppendVariantObjPath(it, "/MenuBar"); return true; }
+    if (std::strcmp(prop, "XAyatanaLabel") == 0)         { AppendVariantStr(it, s.label.c_str()); return true; }
+    if (std::strcmp(prop, "XAyatanaLabelGuide") == 0)    { AppendVariantStr(it, ""); return true; }
+    if (std::strcmp(prop, "XAyatanaOrderingIndex") == 0) { AppendVariantU32(it, 0); return true; }
     return false;
 }
 
-void AppendMenuItem(DBusMessageIter* parent, dbus_int32_t id, bool asVariant) {
+void AppendMenuItemProps(DBusMessageIter* props, const SniManager::Slot& s, dbus_int32_t id) {
+    if (id == 0) {
+        AppendDictStr(props, "children-display", "submenu");
+    } else if (id == 10) {
+        AppendDictStr(props, "label", s.menuStatus.c_str());
+        AppendDictBool(props, "enabled", false);
+        AppendDictBool(props, "visible", true);
+    } else if (id == 11 || id == 2) {
+        AppendDictStr(props, "type", "separator");
+        AppendDictBool(props, "visible", true);
+    } else if (id == 1) {
+        AppendDictStr(props, "label", "Обновить сейчас");
+        AppendDictBool(props, "enabled", true);
+        AppendDictBool(props, "visible", true);
+    } else if (id == 3) {
+        AppendDictStr(props, "label", "Выход");
+        AppendDictBool(props, "enabled", true);
+        AppendDictBool(props, "visible", true);
+    }
+}
+
+void AppendMenuItem(DBusMessageIter* parent, const SniManager::Slot& s, dbus_int32_t id, bool asVariant) {
     DBusMessageIter v, st, props, children;
     DBusMessageIter* target = parent;
     if (asVariant) {
@@ -169,26 +198,13 @@ void AppendMenuItem(DBusMessageIter* parent, dbus_int32_t id, bool asVariant) {
     dbus_message_iter_open_container(target, DBUS_TYPE_STRUCT, nullptr, &st);
     dbus_message_iter_append_basic(&st, DBUS_TYPE_INT32, &id);
     dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "{sv}", &props);
-    if (id == 0) {
-        AppendDictStr(&props, "children-display", "submenu");
-    } else if (id == 1) {
-        AppendDictStr(&props, "label", "Обновить сейчас");
-        AppendDictBool(&props, "enabled", true);
-        AppendDictBool(&props, "visible", true);
-    } else if (id == 2) {
-        AppendDictStr(&props, "type", "separator");
-        AppendDictBool(&props, "visible", true);
-    } else if (id == 3) {
-        AppendDictStr(&props, "label", "Выход");
-        AppendDictBool(&props, "enabled", true);
-        AppendDictBool(&props, "visible", true);
-    }
+    AppendMenuItemProps(&props, s, id);
     dbus_message_iter_close_container(&st, &props);
     dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "v", &children);
     if (id == 0) {
-        AppendMenuItem(&children, 1, true);
-        AppendMenuItem(&children, 2, true);
-        AppendMenuItem(&children, 3, true);
+        for (dbus_int32_t childId : {10, 11, 1, 2, 3}) {
+            AppendMenuItem(&children, s, childId, true);
+        }
     }
     dbus_message_iter_close_container(&st, &children);
     dbus_message_iter_close_container(target, &st);
@@ -228,7 +244,8 @@ DBusHandlerResult HandleSni(DBusConnection* conn, DBusMessage* msg, void* data) 
             static constexpr const char* kProps[] = {
                 "Category", "Id", "Title", "Status", "WindowId", "IconName", "OverlayIconName",
                 "IconPixmap", "OverlayIconPixmap", "AttentionIconName", "AttentionIconPixmap",
-                "AttentionMovieName", "ToolTip", "ItemIsMenu", "Menu"
+                "AttentionMovieName", "ToolTip", "ItemIsMenu", "Menu",
+                "XAyatanaLabel", "XAyatanaLabelGuide", "XAyatanaOrderingIndex"
             };
             for (const char* p : kProps) {
                 DBusMessageIter e;
@@ -243,7 +260,6 @@ DBusHandlerResult HandleSni(DBusConnection* conn, DBusMessage* msg, void* data) 
                dbus_message_is_method_call(msg, "org.kde.StatusNotifierItem", "SecondaryActivate") ||
                dbus_message_is_method_call(msg, "org.kde.StatusNotifierItem", "ContextMenu") ||
                dbus_message_is_method_call(msg, "org.kde.StatusNotifierItem", "Scroll")) {
-        // LMB/scroll intentionally return empty reply; status is shown via hover tooltip.
         rep.p = dbus_message_new_method_return(msg);
     } else {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
@@ -254,7 +270,8 @@ DBusHandlerResult HandleSni(DBusConnection* conn, DBusMessage* msg, void* data) 
 }
 
 DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data) {
-    auto* mgr = static_cast<SniManager*>(data);
+    auto* slot = static_cast<SniManager::Slot*>(data);
+    if (!slot) return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     DbusMsg rep;
 
     if (dbus_message_is_method_call(msg, "org.freedesktop.DBus.Introspectable", "Introspect")) {
@@ -300,9 +317,9 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
         if (rep) {
             DBusMessageIter it;
             dbus_message_iter_init_append(rep.p, &it);
-            dbus_uint32_t rev = 1;
+            dbus_uint32_t rev = slot->menuRevision;
             dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &rev);
-            AppendMenuItem(&it, 0, false);
+            AppendMenuItem(&it, *slot, 0, false);
         }
     } else if (dbus_message_is_method_call(msg, "com.canonical.dbusmenu", "GetGroupProperties")) {
         rep.p = dbus_message_new_method_return(msg);
@@ -310,14 +327,12 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
             DBusMessageIter it, arr;
             dbus_message_iter_init_append(rep.p, &it);
             dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "(ia{sv})", &arr);
-            for (dbus_int32_t id : {1, 2, 3}) {
+            for (dbus_int32_t id : {10, 11, 1, 2, 3}) {
                 DBusMessageIter st, props;
                 dbus_message_iter_open_container(&arr, DBUS_TYPE_STRUCT, nullptr, &st);
                 dbus_message_iter_append_basic(&st, DBUS_TYPE_INT32, &id);
                 dbus_message_iter_open_container(&st, DBUS_TYPE_ARRAY, "{sv}", &props);
-                if (id == 1) { AppendDictStr(&props, "label", "Обновить сейчас"); AppendDictBool(&props, "enabled", true); AppendDictBool(&props, "visible", true); }
-                else if (id == 2) { AppendDictStr(&props, "type", "separator"); AppendDictBool(&props, "visible", true); }
-                else { AppendDictStr(&props, "label", "Выход"); AppendDictBool(&props, "enabled", true); AppendDictBool(&props, "visible", true); }
+                AppendMenuItemProps(&props, *slot, id);
                 dbus_message_iter_close_container(&st, &props);
                 dbus_message_iter_close_container(&arr, &st);
             }
@@ -337,9 +352,9 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
             if (dbus_message_iter_next(&it) && dbus_message_iter_get_arg_type(&it) == DBUS_TYPE_STRING) {
                 const char* ev = nullptr;
                 dbus_message_iter_get_basic(&it, &ev);
-                if (ev && std::strcmp(ev, "clicked") == 0 && mgr && mgr->Control()) {
-                    if (id == 1) mgr->Control()->scanDueMs = 0;
-                    else if (id == 3) mgr->Control()->running = false;
+                if (ev && std::strcmp(ev, "clicked") == 0 && slot->owner && slot->owner->Control()) {
+                    if (id == 1) slot->owner->Control()->scanDueMs = 0;
+                    else if (id == 3) slot->owner->Control()->running = false;
                 }
             }
         }
@@ -385,6 +400,26 @@ void EmitSniSignal(SniManager::Slot& s, const char* sigName, const char* argStr 
     dbus_connection_send(s.conn, sig.p, nullptr);
 }
 
+void EmitLabelSignal(SniManager::Slot& s) {
+    if (!s.conn) return;
+    DbusMsg sig(dbus_message_new_signal("/StatusNotifierItem", "org.kde.StatusNotifierItem", "XAyatanaNewLabel"));
+    if (!sig) return;
+    const char* lbl = s.label.c_str();
+    const char* guide = "";
+    dbus_message_append_args(sig.p, DBUS_TYPE_STRING, &lbl, DBUS_TYPE_STRING, &guide, DBUS_TYPE_INVALID);
+    dbus_connection_send(s.conn, sig.p, nullptr);
+}
+
+void EmitMenuLayoutUpdated(SniManager::Slot& s) {
+    if (!s.conn) return;
+    DbusMsg sig(dbus_message_new_signal("/MenuBar", "com.canonical.dbusmenu", "LayoutUpdated"));
+    if (!sig) return;
+    dbus_uint32_t rev = s.menuRevision;
+    dbus_int32_t parent = 0;
+    dbus_message_append_args(sig.p, DBUS_TYPE_UINT32, &rev, DBUS_TYPE_INT32, &parent, DBUS_TYPE_INVALID);
+    dbus_connection_send(s.conn, sig.p, nullptr);
+}
+
 } // namespace
 
 int64_t NowMs() {
@@ -422,6 +457,7 @@ bool SniManager::Init(bool hideOffline, ControlState* ctrl) {
 
     for (size_t i = 0; i < 3; ++i) {
         slots_[i].spec = &specs[i];
+        slots_[i].owner = this;
         err.Reset();
         slots_[i].conn = dbus_bus_get_private(DBUS_BUS_SESSION, &err.raw);
         if (!slots_[i].conn) {
@@ -435,7 +471,7 @@ bool SniManager::Init(bool hideOffline, ControlState* ctrl) {
         dbus_bus_request_name(slots_[i].conn, slots_[i].busName.c_str(), DBUS_NAME_FLAG_DO_NOT_QUEUE, &err.raw);
 
         dbus_connection_register_object_path(slots_[i].conn, "/StatusNotifierItem", &sniVt, &slots_[i]);
-        dbus_connection_register_object_path(slots_[i].conn, "/MenuBar", &menuVt, this);
+        dbus_connection_register_object_path(slots_[i].conn, "/MenuBar", &menuVt, &slots_[i]);
 
         if (i == 0) {
             dbus_bus_add_match(slots_[i].conn,
@@ -457,29 +493,44 @@ void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
 }
 
 void SniManager::UpdateSlot(Slot& s, const DeviceState& d) {
-    std::string newTitle, newDesc, newOverlay, newStatus;
+    std::string newTitle, newDesc, newLabel, newMenuStatus, newOverlay, newStatus;
     if (d.online && d.percent >= 0) {
-        newTitle = std::string(s.spec->label) + ": " + std::to_string(d.percent) + "%" + (d.charging ? " (зарядка)" : "");
+        const std::string pctStr = std::to_string(d.percent) + "%";
+        newTitle = std::string(s.spec->label) + ": " + pctStr + (d.charging ? " (зарядка)" : "");
         newDesc = d.name;
+        newLabel = pctStr + (d.charging ? " ⚡" : "");
+        newMenuStatus = d.name.empty() ? newTitle : (d.name + " — " + pctStr + (d.charging ? " ⚡" : ""));
         newOverlay = (!d.charging && d.percent <= 20) ? "battery-caution-symbolic" : "";
         newStatus = "Active";
     } else {
         newTitle = std::string(s.spec->label) + ": не подключено";
+        newMenuStatus = newTitle;
         newStatus = hideOffline_ ? "Passive" : "Active";
     }
 
     const bool tipChanged = (newTitle != s.tipTitle || newDesc != s.tipDesc);
+    const bool lblChanged = (newLabel != s.label);
+    const bool menuChanged = (newMenuStatus != s.menuStatus);
     const bool ovChanged = (newOverlay != s.overlay);
     const bool stChanged = (newStatus != s.status);
 
     s.tipTitle = std::move(newTitle);
     s.tipDesc = std::move(newDesc);
+    s.label = std::move(newLabel);
+    s.menuStatus = std::move(newMenuStatus);
     s.overlay = std::move(newOverlay);
     s.status = std::move(newStatus);
 
     if (tipChanged) {
         EmitSniSignal(s, "NewTitle");
         EmitSniSignal(s, "NewToolTip");
+    }
+    if (lblChanged) {
+        EmitLabelSignal(s);
+    }
+    if (menuChanged) {
+        ++s.menuRevision;
+        EmitMenuLayoutUpdated(s);
     }
     if (ovChanged) {
         EmitSniSignal(s, "NewOverlayIcon");

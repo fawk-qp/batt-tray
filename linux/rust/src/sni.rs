@@ -26,12 +26,16 @@ const SNI_XML: &str = concat!(
     "<property name='ToolTip' type='(sa(iiay)ss)' access='read'/>",
     "<property name='ItemIsMenu' type='b' access='read'/>",
     "<property name='Menu' type='o' access='read'/>",
+    "<property name='XAyatanaLabel' type='s' access='read'/>",
+    "<property name='XAyatanaLabelGuide' type='s' access='read'/>",
+    "<property name='XAyatanaOrderingIndex' type='u' access='read'/>",
     "<method name='ContextMenu'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>",
     "<method name='Activate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>",
     "<method name='SecondaryActivate'><arg type='i' direction='in'/><arg type='i' direction='in'/></method>",
     "<method name='Scroll'><arg type='i' direction='in'/><arg type='s' direction='in'/></method>",
     "<signal name='NewTitle'/><signal name='NewIcon'/><signal name='NewOverlayIcon'/>",
     "<signal name='NewToolTip'/><signal name='NewStatus'><arg type='s'/></signal>",
+    "<signal name='XAyatanaNewLabel'><arg type='s'/><arg type='s'/></signal>",
     "</interface><interface name='org.freedesktop.DBus.Properties'>",
     "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='out'/></method>",
     "<method name='GetAll'><arg type='s' direction='in'/><arg type='a{sv}' direction='out'/></method>",
@@ -49,6 +53,7 @@ const MENU_XML: &str = concat!(
     "<method name='GetGroupProperties'><arg type='ai' direction='in'/><arg type='as' direction='in'/><arg type='a(ia{sv})' direction='out'/></method>",
     "<method name='Event'><arg type='i' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='in'/><arg type='u' direction='in'/></method>",
     "<method name='AboutToShow'><arg type='i' direction='in'/><arg type='b' direction='out'/></method>",
+    "<signal name='LayoutUpdated'><arg type='u'/><arg type='i'/></signal>",
     "</interface><interface name='org.freedesktop.DBus.Properties'>",
     "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='v' direction='out'/></method>",
     "<method name='GetAll'><arg type='s' direction='in'/><arg type='a{sv}' direction='out'/></method>",
@@ -62,20 +67,26 @@ struct SlotSnapshot {
     icon_name: &'static str,
     tip_title: String,
     tip_desc: String,
+    label: String,
+    menu_status: String,
     overlay: String,
     status: String,
+    menu_revision: u32,
 }
 
 struct TraySlot {
     id: &'static str,
-    label: &'static str,
+    label_prefix: &'static str,
     icon_name: &'static str,
     bus_name: String,
     conn: *mut DBusConnection,
     tip_title: String,
     tip_desc: String,
+    label: String,
+    menu_status: String,
     overlay: String,
     status: String,
+    menu_revision: u32,
 }
 
 impl TraySlot {
@@ -85,10 +96,25 @@ impl TraySlot {
             icon_name: self.icon_name,
             tip_title: self.tip_title.clone(),
             tip_desc: self.tip_desc.clone(),
+            label: self.label.clone(),
+            menu_status: self.menu_status.clone(),
             overlay: self.overlay.clone(),
             status: self.status.clone(),
+            menu_revision: self.menu_revision,
         }
     }
+}
+
+struct SlotEmit {
+    conn: *mut DBusConnection,
+    tip_ch: bool,
+    lbl_ch: bool,
+    menu_ch: bool,
+    ov_ch: bool,
+    st_ch: bool,
+    label: String,
+    status: String,
+    menu_rev: u32,
 }
 
 thread_local! {
@@ -168,12 +194,41 @@ unsafe fn append_sni_prop(it: *mut DBusMessageIter, s: &SlotSnapshot, prop: &str
         "ToolTip" => append_var_tooltip(it, s),
         "ItemIsMenu" => append_var_bool(it, false),
         "Menu" => append_var_obj(it, "/MenuBar"),
+        "XAyatanaLabel" => append_var_str(it, &s.label),
+        "XAyatanaLabelGuide" => append_var_str(it, ""),
+        "XAyatanaOrderingIndex" => append_var_u32(it, 0),
         _ => return false,
     }
     true
 }
 
-unsafe fn append_menu_item(parent: *mut DBusMessageIter, id: i32, as_var: bool) {
+unsafe fn append_menu_item_props(props: *mut DBusMessageIter, s: &SlotSnapshot, id: i32) {
+    match id {
+        0 => append_dict_str(props, "children-display", "submenu"),
+        10 => {
+            append_dict_str(props, "label", &s.menu_status);
+            append_dict_bool(props, "enabled", false);
+            append_dict_bool(props, "visible", true);
+        }
+        11 | 2 => {
+            append_dict_str(props, "type", "separator");
+            append_dict_bool(props, "visible", true);
+        }
+        1 => {
+            append_dict_str(props, "label", "Обновить сейчас");
+            append_dict_bool(props, "enabled", true);
+            append_dict_bool(props, "visible", true);
+        }
+        3 => {
+            append_dict_str(props, "label", "Выход");
+            append_dict_bool(props, "enabled", true);
+            append_dict_bool(props, "visible", true);
+        }
+        _ => {}
+    }
+}
+
+unsafe fn append_menu_item(parent: *mut DBusMessageIter, s: &SlotSnapshot, id: i32, as_var: bool) {
     let mut v = zero_iter();
     let mut st = zero_iter();
     let mut props = zero_iter();
@@ -187,30 +242,13 @@ unsafe fn append_menu_item(parent: *mut DBusMessageIter, id: i32, as_var: bool) 
     dbus_message_iter_open_container(target, DBUS_TYPE_STRUCT, null(), &mut st);
     dbus_message_iter_append_basic(&mut st, DBUS_TYPE_INT32, &id as *const i32 as *const c_void);
     dbus_message_iter_open_container(&mut st, DBUS_TYPE_ARRAY, b"{sv}\0".as_ptr() as *const c_char, &mut props);
-    match id {
-        0 => append_dict_str(&mut props, "children-display", "submenu"),
-        1 => {
-            append_dict_str(&mut props, "label", "Обновить сейчас");
-            append_dict_bool(&mut props, "enabled", true);
-            append_dict_bool(&mut props, "visible", true);
-        }
-        2 => {
-            append_dict_str(&mut props, "type", "separator");
-            append_dict_bool(&mut props, "visible", true);
-        }
-        3 => {
-            append_dict_str(&mut props, "label", "Выход");
-            append_dict_bool(&mut props, "enabled", true);
-            append_dict_bool(&mut props, "visible", true);
-        }
-        _ => {}
-    }
+    append_menu_item_props(&mut props, s, id);
     dbus_message_iter_close_container(&mut st, &mut props);
     dbus_message_iter_open_container(&mut st, DBUS_TYPE_ARRAY, b"v\0".as_ptr() as *const c_char, &mut ch);
     if id == 0 {
-        append_menu_item(&mut ch, 1, true);
-        append_menu_item(&mut ch, 2, true);
-        append_menu_item(&mut ch, 3, true);
+        for child_id in [10i32, 11, 1, 2, 3] {
+            append_menu_item(&mut ch, s, child_id, true);
+        }
     }
     dbus_message_iter_close_container(&mut st, &mut ch);
     dbus_message_iter_close_container(target, &mut st);
@@ -265,6 +303,7 @@ unsafe extern "C" fn handle_sni(conn: *mut DBusConnection, msg: *mut DBusMessage
                 "Category", "Id", "Title", "Status", "WindowId", "IconName", "OverlayIconName",
                 "IconPixmap", "OverlayIconPixmap", "AttentionIconName", "AttentionIconPixmap",
                 "AttentionMovieName", "ToolTip", "ItemIsMenu", "Menu",
+                "XAyatanaLabel", "XAyatanaLabelGuide", "XAyatanaOrderingIndex",
             ] {
                 let mut e = zero_iter();
                 dbus_message_iter_open_container(&mut dict, DBUS_TYPE_DICT_ENTRY, null(), &mut e);
@@ -280,7 +319,6 @@ unsafe extern "C" fn handle_sni(conn: *mut DBusConnection, msg: *mut DBusMessage
         || dbus_message_is_method_call(msg, b"org.kde.StatusNotifierItem\0".as_ptr() as *const c_char, b"ContextMenu\0".as_ptr() as *const c_char) != 0
         || dbus_message_is_method_call(msg, b"org.kde.StatusNotifierItem\0".as_ptr() as *const c_char, b"Scroll\0".as_ptr() as *const c_char) != 0
     {
-        // LMB/scroll intentionally return empty reply; status is hover-only.
         DbusMsg::new(dbus_message_new_method_return(msg))
     } else {
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
@@ -290,7 +328,13 @@ unsafe extern "C" fn handle_sni(conn: *mut DBusConnection, msg: *mut DBusMessage
     DBUS_HANDLER_RESULT_HANDLED
 }
 
-unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessage, _: *mut c_void) -> c_int {
+unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessage, user_data: *mut c_void) -> c_int {
+    let idx = user_data as usize;
+    let snap = SLOTS.with(|s| s.borrow().get(idx).map(TraySlot::snapshot));
+    let Some(snap) = snap else {
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    };
+
     let rep = if dbus_message_is_method_call(msg, b"org.freedesktop.DBus.Introspectable\0".as_ptr() as *const c_char, b"Introspect\0".as_ptr() as *const c_char) != 0 {
         DbusMsg::new(dbus_message_new_method_return(msg)).map(|r| {
             let mut it = zero_iter();
@@ -343,9 +387,9 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
         DbusMsg::new(dbus_message_new_method_return(msg)).map(|r| {
             let mut it = zero_iter();
             dbus_message_iter_init_append(r.0, &mut it);
-            let rev = 1u32;
+            let rev = snap.menu_revision;
             dbus_message_iter_append_basic(&mut it, DBUS_TYPE_UINT32, &rev as *const u32 as *const c_void);
-            append_menu_item(&mut it, 0, false);
+            append_menu_item(&mut it, &snap, 0, false);
             r
         })
     } else if dbus_message_is_method_call(msg, b"com.canonical.dbusmenu\0".as_ptr() as *const c_char, b"GetGroupProperties\0".as_ptr() as *const c_char) != 0 {
@@ -354,24 +398,13 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
             let mut arr = zero_iter();
             dbus_message_iter_init_append(r.0, &mut it);
             dbus_message_iter_open_container(&mut it, DBUS_TYPE_ARRAY, b"(ia{sv})\0".as_ptr() as *const c_char, &mut arr);
-            for id in [1i32, 2, 3] {
+            for id in [10i32, 11, 1, 2, 3] {
                 let mut st = zero_iter();
                 let mut props = zero_iter();
                 dbus_message_iter_open_container(&mut arr, DBUS_TYPE_STRUCT, null(), &mut st);
                 dbus_message_iter_append_basic(&mut st, DBUS_TYPE_INT32, &id as *const i32 as *const c_void);
                 dbus_message_iter_open_container(&mut st, DBUS_TYPE_ARRAY, b"{sv}\0".as_ptr() as *const c_char, &mut props);
-                if id == 1 {
-                    append_dict_str(&mut props, "label", "Обновить сейчас");
-                    append_dict_bool(&mut props, "enabled", true);
-                    append_dict_bool(&mut props, "visible", true);
-                } else if id == 2 {
-                    append_dict_str(&mut props, "type", "separator");
-                    append_dict_bool(&mut props, "visible", true);
-                } else {
-                    append_dict_str(&mut props, "label", "Выход");
-                    append_dict_bool(&mut props, "enabled", true);
-                    append_dict_bool(&mut props, "visible", true);
-                }
+                append_menu_item_props(&mut props, &snap, id);
                 dbus_message_iter_close_container(&mut st, &mut props);
                 dbus_message_iter_close_container(&mut arr, &mut st);
             }
@@ -445,25 +478,84 @@ unsafe fn emit_sig(conn: *mut DBusConnection, name: &str, arg: Option<&str>) {
     dbus_connection_send(conn, sig.0, null_mut());
 }
 
-fn compute_slot_update(slot: &mut TraySlot, dev: &DeviceState) -> (bool, bool, bool, String) {
-    let (new_title, new_desc, new_ov, new_st) = if dev.online && dev.percent >= 0 {
-        let ch = if dev.charging { " (зарядка)" } else { "" };
+unsafe fn emit_label_sig(conn: *mut DBusConnection, label: &str) {
+    let Some(sig) = DbusMsg::new(dbus_message_new_signal(
+        b"/StatusNotifierItem\0".as_ptr() as *const c_char,
+        b"org.kde.StatusNotifierItem\0".as_ptr() as *const c_char,
+        b"XAyatanaNewLabel\0".as_ptr() as *const c_char,
+    )) else {
+        return;
+    };
+    let mut it = zero_iter();
+    dbus_message_iter_init_append(sig.0, &mut it);
+    append_str(&mut it, label);
+    append_str(&mut it, "");
+    dbus_connection_send(conn, sig.0, null_mut());
+}
+
+unsafe fn emit_layout_updated(conn: *mut DBusConnection, rev: u32) {
+    let Some(sig) = DbusMsg::new(dbus_message_new_signal(
+        b"/MenuBar\0".as_ptr() as *const c_char,
+        b"com.canonical.dbusmenu\0".as_ptr() as *const c_char,
+        b"LayoutUpdated\0".as_ptr() as *const c_char,
+    )) else {
+        return;
+    };
+    let mut it = zero_iter();
+    dbus_message_iter_init_append(sig.0, &mut it);
+    let parent = 0i32;
+    dbus_message_iter_append_basic(&mut it, DBUS_TYPE_UINT32, &rev as *const u32 as *const c_void);
+    dbus_message_iter_append_basic(&mut it, DBUS_TYPE_INT32, &parent as *const i32 as *const c_void);
+    dbus_connection_send(conn, sig.0, null_mut());
+}
+
+fn compute_slot_update(slot: &mut TraySlot, dev: &DeviceState) -> SlotEmit {
+    let (new_title, new_desc, new_lbl, new_menu, new_ov, new_st) = if dev.online && dev.percent >= 0 {
+        let pct_str = format!("{}%", dev.percent);
+        let ch_long = if dev.charging { " (зарядка)" } else { "" };
+        let ch_short = if dev.charging { " ⚡" } else { "" };
+        let title = format!("{}: {}{}", slot.label_prefix, pct_str, ch_long);
+        let lbl = format!("{}{}", pct_str, ch_short);
+        let menu = if dev.name.is_empty() {
+            title.clone()
+        } else {
+            format!("{} — {}{}", dev.name, pct_str, ch_short)
+        };
         let ov = if !dev.charging && dev.percent <= 20 { "battery-caution-symbolic" } else { "" };
-        (format!("{}: {}%{}", slot.label, dev.percent, ch), dev.name.clone(), ov.to_string(), "Active".to_string())
+        (title, dev.name.clone(), lbl, menu, ov.to_string(), "Active".to_string())
     } else {
+        let title = format!("{}: не подключено", slot.label_prefix);
         let st = if HIDE_OFFLINE.load(Ordering::Relaxed) { "Passive" } else { "Active" };
-        (format!("{}: не подключено", slot.label), String::new(), String::new(), st.to_string())
+        (title.clone(), String::new(), String::new(), title, String::new(), st.to_string())
     };
 
     let tip_ch = new_title != slot.tip_title || new_desc != slot.tip_desc;
+    let lbl_ch = new_lbl != slot.label;
+    let menu_ch = new_menu != slot.menu_status;
     let ov_ch = new_ov != slot.overlay;
     let st_ch = new_st != slot.status;
 
     slot.tip_title = new_title;
     slot.tip_desc = new_desc;
+    slot.label = new_lbl.clone();
+    slot.menu_status = new_menu;
     slot.overlay = new_ov;
     slot.status = new_st.clone();
-    (tip_ch, ov_ch, st_ch, new_st)
+    if menu_ch {
+        slot.menu_revision = slot.menu_revision.wrapping_add(1).max(1);
+    }
+
+    SlotEmit {
+        conn: slot.conn,
+        tip_ch,
+        lbl_ch,
+        menu_ch,
+        ov_ch,
+        st_ch,
+        label: new_lbl,
+        status: new_st,
+        menu_rev: slot.menu_revision,
+    }
 }
 
 unsafe extern "C" fn watcher_filter(_: *mut DBusConnection, msg: *mut DBusMessage, _: *mut c_void) -> c_int {
@@ -524,14 +616,17 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
 
         let mut slot = TraySlot {
             id: spec.id,
-            label: spec.label,
+            label_prefix: spec.label,
             icon_name: spec.icon_name,
             bus_name,
             conn,
             tip_title: String::new(),
             tip_desc: String::new(),
+            label: String::new(),
+            menu_status: String::new(),
             overlay: String::new(),
             status: "Active".to_string(),
+            menu_revision: 1,
         };
         let _ = compute_slot_update(&mut slot, &DeviceState::default());
         register_watcher(slot.conn, &slot.bus_name);
@@ -544,34 +639,37 @@ pub unsafe fn init_slots(hide_offline: bool) -> Option<[*mut DBusConnection; 3]>
 }
 
 pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
-    let updates: Vec<(*mut DBusConnection, bool, bool, bool, String)> = SLOTS.with(|s| {
+    let updates: Vec<SlotEmit> = SLOTS.with(|s| {
         let mut slots = s.borrow_mut();
         (0..3)
-            .map(|i| {
-                let (tip_ch, ov_ch, st_ch, st) = compute_slot_update(&mut slots[i], &found[i]);
-                (slots[i].conn, tip_ch, ov_ch, st_ch, st)
-            })
+            .map(|i| compute_slot_update(&mut slots[i], &found[i]))
             .collect()
     });
 
-    for (conn, tip_ch, ov_ch, st_ch, st) in updates {
-        if tip_ch {
-            emit_sig(conn, "NewTitle", None);
-            emit_sig(conn, "NewToolTip", None);
+    for u in updates {
+        if u.tip_ch {
+            emit_sig(u.conn, "NewTitle", None);
+            emit_sig(u.conn, "NewToolTip", None);
         }
-        if ov_ch {
-            emit_sig(conn, "NewOverlayIcon", None);
-            emit_sig(conn, "NewIcon", None);
+        if u.lbl_ch {
+            emit_label_sig(u.conn, &u.label);
         }
-        if st_ch {
-            emit_sig(conn, "NewStatus", Some(&st));
+        if u.menu_ch {
+            emit_layout_updated(u.conn, u.menu_rev);
         }
-        dbus_connection_flush(conn);
+        if u.ov_ch {
+            emit_sig(u.conn, "NewOverlayIcon", None);
+            emit_sig(u.conn, "NewIcon", None);
+        }
+        if u.st_ch {
+            emit_sig(u.conn, "NewStatus", Some(&u.status));
+        }
+        dbus_connection_flush(u.conn);
     }
 }
 
 pub unsafe fn shutdown_slots() {
-    let slots = SLOTS.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    let slots: Vec<TraySlot> = SLOTS.with(|s| std::mem::take(&mut *s.borrow_mut()));
     for s in slots {
         dbus_connection_close(s.conn);
         dbus_connection_unref(s.conn);
