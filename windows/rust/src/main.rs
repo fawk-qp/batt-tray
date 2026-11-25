@@ -10,10 +10,14 @@ mod win32;
 use device::DeviceState;
 use std::cell::RefCell;
 use std::ffi::c_void;
+use std::mem::size_of;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use tray::{toggle_autostart, TrayManager, IDM_AUTOSTART, IDM_EXIT, IDM_HIST_CLEAR, IDM_REFRESH, WM_APP_SCAN_DONE, WM_APP_TRAY};
+use tray::{
+    toggle_autostart, TrayManager, IDM_AUTOSTART, IDM_DISCONNECT_BASE, IDM_EXIT, IDM_HIST_CLEAR,
+    IDM_REFRESH, WM_APP_SCAN_DONE, WM_APP_TRAY,
+};
 use win32::*;
 
 const TIMER_DEBOUNCE: usize = 1;
@@ -22,40 +26,9 @@ const COALESCE_TOLERANCE_MS: u32 = 500;
 const POLL_INTERVAL_MS: u32 = 120_000;
 
 #[derive(Clone, Copy)]
-struct SendPtr(*mut std::ffi::c_void);
+struct SendPtr(*mut c_void);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
-
-fn apply_process_hardening_and_eco_mode() {
-    unsafe {
-        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
-
-        let dyn_code_policy = MitigationFlagsPolicy { flags: 0x1 };
-        SetProcessMitigationPolicy(2, &dyn_code_policy as *const _ as *const c_void, std::mem::size_of::<MitigationFlagsPolicy>());
-
-        let ext_policy = MitigationFlagsPolicy { flags: 0x1 };
-        SetProcessMitigationPolicy(6, &ext_policy as *const _ as *const c_void, std::mem::size_of::<MitigationFlagsPolicy>());
-
-        let font_policy = MitigationFlagsPolicy { flags: 0x1 };
-        SetProcessMitigationPolicy(9, &font_policy as *const _ as *const c_void, std::mem::size_of::<MitigationFlagsPolicy>());
-
-        let img_policy = MitigationFlagsPolicy { flags: 0x1 | 0x2 | 0x4 };
-        SetProcessMitigationPolicy(10, &img_policy as *const _ as *const c_void, std::mem::size_of::<MitigationFlagsPolicy>());
-
-        let handle_policy = MitigationFlagsPolicy { flags: 0x1 | 0x2 };
-        SetProcessMitigationPolicy(3, &handle_policy as *const _ as *const c_void, std::mem::size_of::<MitigationFlagsPolicy>());
-
-        SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS);
-        let eco = PowerThrottlingPolicy { version: 1, control_mask: 1, state_mask: 1 };
-        SetProcessInformation(GetCurrentProcess(), 4, &eco as *const _ as *const c_void, std::mem::size_of::<PowerThrottlingPolicy>() as u32);
-    }
-}
-
-fn trim_idle_working_set() {
-    unsafe {
-        SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, 0);
-    }
-}
 
 struct AppState {
     tray: TrayManager,
@@ -68,6 +41,35 @@ struct AppState {
 
 thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
+}
+
+unsafe fn apply_hardening_and_eco_mode() {
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    // Block dynamic code generation (2), invalid handles (3), extension points (6), non-system fonts (9), unsafe image loads (10)
+    let dyn_code = MitigationFlagsPolicy { flags: 0x1 };
+    SetProcessMitigationPolicy(2, &dyn_code as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
+
+    let handle_chk = MitigationFlagsPolicy { flags: 0x1 | 0x2 };
+    SetProcessMitigationPolicy(3, &handle_chk as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
+
+    let ext_pts = MitigationFlagsPolicy { flags: 0x1 };
+    SetProcessMitigationPolicy(6, &ext_pts as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
+
+    let font_pol = MitigationFlagsPolicy { flags: 0x1 };
+    SetProcessMitigationPolicy(9, &font_pol as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
+
+    let img_pol = MitigationFlagsPolicy { flags: 0x1 | 0x2 | 0x4 };
+    SetProcessMitigationPolicy(10, &img_pol as *const _ as *const c_void, size_of::<MitigationFlagsPolicy>());
+
+    let proc = GetCurrentProcess();
+    SetPriorityClass(proc, IDLE_PRIORITY_CLASS);
+    let eco = PowerThrottlingPolicy { version: 1, control_mask: 1, state_mask: 1 };
+    SetProcessInformation(proc, 4, &eco as *const _ as *const c_void, size_of::<PowerThrottlingPolicy>() as u32);
+}
+
+unsafe fn trim_idle_working_set() {
+    SetProcessWorkingSetSizeEx(GetCurrentProcess(), usize::MAX, usize::MAX, 0);
 }
 
 fn worker_loop(hwnd: SendPtr, stop: SendPtr, scan: SendPtr, pending: Arc<Mutex<[DeviceState; 3]>>) {
@@ -87,7 +89,62 @@ fn worker_loop(hwnd: SendPtr, stop: SendPtr, scan: SendPtr, pending: Arc<Mutex<[
         }
     }
     if com_hr >= 0 {
-        unsafe { CoUninitialize() };
+        unsafe { CoUninitialize(); }
+    }
+}
+
+unsafe fn handle_menu_cmd(hwnd: HWND, cmd: usize) -> bool {
+    match cmd {
+        IDM_REFRESH => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow().as_ref() {
+                    SetEvent(app.scan_event);
+                }
+            });
+            true
+        }
+        IDM_AUTOSTART => {
+            toggle_autostart();
+            true
+        }
+        IDM_EXIT => {
+            DestroyWindow(hwnd);
+            true
+        }
+        _ if cmd >= IDM_DISCONNECT_BASE => {
+            let disc = APP.with(|cell| {
+                let mut guard = cell.borrow_mut();
+                let app = guard.as_mut()?;
+                let addr = app.tray.take_disconnect_addr(cmd)?;
+                let mut dup_ev: HANDLE = null_mut();
+                if !app.scan_event.is_null() {
+                    let proc = GetCurrentProcess();
+                    DuplicateHandle(proc, app.scan_event, proc, &mut dup_ev, 0, 0, DUPLICATE_SAME_ACCESS);
+                }
+                Some((addr, SendPtr(dup_ev)))
+            });
+            if let Some((addr, ev_ptr)) = disc {
+                thread::spawn(move || {
+                    scanner::disconnect_bluetooth_device(addr);
+                    if !ev_ptr.0.is_null() {
+                        SetEvent(ev_ptr.0);
+                        Sleep(1200);
+                        SetEvent(ev_ptr.0);
+                        CloseHandle(ev_ptr.0);
+                    }
+                });
+            }
+            true
+        }
+        _ if cmd >= IDM_HIST_CLEAR => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    app.tray.handle_menu_command(cmd);
+                }
+            });
+            true
+        }
+        _ => false,
     }
 }
 
@@ -110,11 +167,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_APP_TRAY => {
             let ev = lparam as u32;
             if ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU {
-                APP.with(|cell| {
-                    if let Some(app) = cell.borrow_mut().as_mut() {
-                        app.tray.show_context_menu(hwnd, wparam as u32);
-                    }
+                let menu = APP.with(|cell| {
+                    cell.borrow_mut()
+                        .as_mut()
+                        .map(|app| app.tray.build_context_menu(wparam as u32))
+                        .unwrap_or(null_mut())
                 });
+                if !menu.is_null() {
+                    let cmd = TrayManager::track_and_destroy_menu(hwnd, menu);
+                    if cmd != 0 {
+                        handle_menu_cmd(hwnd, cmd);
+                    }
+                }
             }
             0
         }
@@ -130,32 +194,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         WM_COMMAND => {
-            match wparam & 0xFFFF {
-                IDM_REFRESH => {
-                    APP.with(|cell| {
-                        if let Some(app) = cell.borrow().as_ref() {
-                            SetEvent(app.scan_event);
-                        }
-                    });
-                    0
-                }
-                IDM_AUTOSTART => {
-                    toggle_autostart();
-                    0
-                }
-                IDM_EXIT => {
-                    DestroyWindow(hwnd);
-                    0
-                }
-                cmd if cmd >= IDM_HIST_CLEAR => {
-                    APP.with(|cell| {
-                        if let Some(app) = cell.borrow_mut().as_mut() {
-                            app.tray.handle_menu_command(cmd);
-                        }
-                    });
-                    0
-                }
-                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            if handle_menu_cmd(hwnd, wparam & 0xFFFF) {
+                0
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
         }
         WM_DEVICECHANGE => {
@@ -175,15 +217,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             0
         }
-        WM_DPICHANGED | WM_DISPLAYCHANGE => {
-            APP.with(|cell| {
-                if let Some(app) = cell.borrow_mut().as_mut() {
-                    app.tray.readd_icons();
-                }
-            });
-            trim_idle_working_set();
-            0
-        }
         WM_SETTINGCHANGE => {
             if lparam != 0 {
                 let ptr = lparam as *const u16;
@@ -195,11 +228,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     APP.with(|cell| {
                         if let Some(app) = cell.borrow_mut().as_mut() {
                             app.tray.refresh_theme();
+                            trim_idle_working_set();
                         }
                     });
-                    trim_idle_working_set();
                 }
             }
+            0
+        }
+        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    app.tray.readd_icons();
+                    trim_idle_working_set();
+                }
+            });
             0
         }
         WM_DESTROY => {
@@ -221,7 +263,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
 fn main() {
     unsafe {
-        apply_process_hardening_and_eco_mode();
+        apply_hardening_and_eco_mode();
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let mutex_name = to_wide("Local\\BattTraySingleInstance");
@@ -270,6 +312,7 @@ fn main() {
         let taskbar_msg_name = to_wide("TaskbarCreated");
         let msg_taskbar_created = RegisterWindowMessageW(taskbar_msg_name.as_ptr());
         let tray = TrayManager::new(hwnd);
+        trim_idle_working_set();
         let pending = Arc::new(Mutex::new(Default::default()));
 
         let hwnd_s = SendPtr(hwnd);
@@ -288,8 +331,6 @@ fn main() {
                 worker: Some(worker),
             });
         });
-
-        trim_idle_working_set();
 
         let mut msg = std::mem::zeroed::<MSG>();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {

@@ -4,6 +4,7 @@
 #include "history.hpp"
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@ constexpr UINT IDM_AUTOSTART = 2002;
 constexpr UINT IDM_EXIT = 2003;
 constexpr UINT IDM_HIST_CLEAR = 2010;
 constexpr UINT IDM_HIST_DEL_BASE = 2100;
+constexpr UINT IDM_DISCONNECT_BASE = 2200;
 
 class TrayManager {
 public:
@@ -25,6 +27,7 @@ public:
     void RefreshTheme();
     void ShowContextMenu(HWND hwnd, UINT uid);
     void HandleMenuCommand(UINT cmdId);
+    uint64_t TakeDisconnectAddr(UINT cmdId);
     void Shutdown();
 
     static bool IsAutostartEnabled();
@@ -52,4 +55,5 @@ private:
 
     size_t menuSlot_ = 0;
     std::vector<std::wstring> menuInactiveKeys_;
+    std::vector<uint64_t> menuDisconnectAddrs_;
 };

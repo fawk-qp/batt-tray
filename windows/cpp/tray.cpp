@@ -179,12 +179,38 @@ void TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
         }
     }
     menuInactiveKeys_.clear();
+    menuDisconnectAddrs_.clear();
 
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
 
     const std::wstring header = FormatMenuHeader(specs[menuSlot_], states_[menuSlot_]);
     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_HEADER, header.c_str());
+
+    std::vector<const DeviceEntry*> activeBt;
+    for (const auto& item : states_[menuSlot_].items) {
+        if (item.bthAddr != 0) activeBt.push_back(&item);
+    }
+    if (activeBt.size() == 1) {
+        menuDisconnectAddrs_.push_back(activeBt[0]->bthAddr);
+        AppendMenuW(menu, MF_STRING, IDM_DISCONNECT_BASE, L"Отключить устройство");
+    } else if (activeBt.size() > 1) {
+        HMENU discMenu = CreatePopupMenu();
+        if (discMenu) {
+            for (const auto* d : activeBt) {
+                menuDisconnectAddrs_.push_back(d->bthAddr);
+                const UINT cmdId = IDM_DISCONNECT_BASE + static_cast<UINT>(menuDisconnectAddrs_.size() - 1);
+                const std::wstring title = d->name.empty()
+                    ? std::wstring(specs[menuSlot_].label)
+                    : TruncateName(d->name, 28);
+                const std::wstring row = (d->activeAudio ? L"\u25B6 " : L"\u2022 ") +
+                                         title + L" — " + std::to_wstring(d->percent) + L"%";
+                AppendMenuW(discMenu, MF_STRING, cmdId, row.c_str());
+            }
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(discMenu), L"Отключить устройство");
+        }
+    }
+
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
     const auto inactive = history_.GetInactiveForKind(specs[menuSlot_].kind, states_[menuSlot_].items);
@@ -235,13 +261,21 @@ void TrayManager::HandleMenuCommand(UINT cmdId) {
         menuInactiveKeys_.clear();
         return;
     }
-    if (cmdId >= IDM_HIST_DEL_BASE) {
+    if (cmdId >= IDM_HIST_DEL_BASE && cmdId < IDM_DISCONNECT_BASE) {
         const size_t idx = static_cast<size_t>(cmdId - IDM_HIST_DEL_BASE);
         if (idx < menuInactiveKeys_.size()) {
             history_.RemoveEntry(specs[menuSlot_].kind, menuInactiveKeys_[idx]);
         }
         menuInactiveKeys_.clear();
     }
+}
+
+uint64_t TrayManager::TakeDisconnectAddr(UINT cmdId) {
+    if (cmdId < IDM_DISCONNECT_BASE) return 0;
+    const size_t idx = static_cast<size_t>(cmdId - IDM_DISCONNECT_BASE);
+    uint64_t addr = (idx < menuDisconnectAddrs_.size()) ? menuDisconnectAddrs_[idx] : 0;
+    menuDisconnectAddrs_.clear();
+    return addr;
 }
 
 void TrayManager::Shutdown() {

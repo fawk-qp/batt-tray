@@ -1,4 +1,4 @@
-use crate::device::{DeviceState, SLOT_SPECS};
+use crate::device::{DeviceEntry, DeviceState, SLOT_SPECS};
 use crate::history::DeviceHistory;
 use crate::icon::{create_battery_tray_icon, get_taskbar_icon_size, is_taskbar_light_theme};
 use crate::win32::*;
@@ -13,6 +13,7 @@ pub const IDM_AUTOSTART: usize = 2002;
 pub const IDM_EXIT: usize = 2003;
 pub const IDM_HIST_CLEAR: usize = 2010;
 pub const IDM_HIST_DEL_BASE: usize = 2100;
+pub const IDM_DISCONNECT_BASE: usize = 2200;
 
 const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "BattTray";
@@ -37,6 +38,7 @@ pub struct TrayManager {
     cache: [SlotCache; 3],
     menu_slot: usize,
     menu_inactive_keys: Vec<String>,
+    menu_disconnect_addrs: Vec<u64>,
 }
 
 impl TrayManager {
@@ -52,6 +54,7 @@ impl TrayManager {
             cache: Default::default(),
             menu_slot: 0,
             menu_inactive_keys: Vec::new(),
+            menu_disconnect_addrs: Vec::new(),
         };
         let icon_size = get_taskbar_icon_size();
         for i in 0..3 {
@@ -108,20 +111,48 @@ impl TrayManager {
         }
     }
 
-    pub fn show_context_menu(&mut self, hwnd: HWND, uid: u32) {
+    // Builds the popup HMENU without running TrackPopupMenu so RefCell borrows can be released before the modal loop.
+    pub fn build_context_menu(&mut self, uid: u32) -> HMENU {
         self.menu_slot = SLOT_SPECS.iter().position(|s| s.uid == uid).unwrap_or(0);
         self.menu_inactive_keys.clear();
+        self.menu_disconnect_addrs.clear();
 
         unsafe {
             let menu = CreatePopupMenu();
             if menu.is_null() {
-                return;
+                return null_mut();
             }
 
             let spec = &SLOT_SPECS[self.menu_slot];
             let st = &self.states[self.menu_slot];
             let header = to_wide(&format_menu_header(spec.label, st));
             AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_HEADER, header.as_ptr());
+
+            let active_bt: Vec<&DeviceEntry> = st.items.iter().filter(|d| d.bth_addr != 0).collect();
+            if active_bt.len() == 1 {
+                self.menu_disconnect_addrs.push(active_bt[0].bth_addr);
+                let s_disc = to_wide("Отключить устройство");
+                AppendMenuW(menu, MF_STRING, IDM_DISCONNECT_BASE, s_disc.as_ptr());
+            } else if active_bt.len() > 1 {
+                let disc_menu = CreatePopupMenu();
+                if !disc_menu.is_null() {
+                    for d in active_bt {
+                        self.menu_disconnect_addrs.push(d.bth_addr);
+                        let cmd_id = IDM_DISCONNECT_BASE + (self.menu_disconnect_addrs.len() - 1);
+                        let title = if d.name.is_empty() {
+                            spec.label.to_string()
+                        } else {
+                            truncate_chars(&d.name, 28)
+                        };
+                        let prefix = if d.active_audio { "\u{25B6} " } else { "\u{2022} " };
+                        let row = to_wide(&format!("{}{} — {}%", prefix, title, d.percent));
+                        AppendMenuW(disc_menu, MF_STRING, cmd_id, row.as_ptr());
+                    }
+                    let s_disc = to_wide("Отключить устройство");
+                    AppendMenuW(menu, MF_POPUP, disc_menu as usize, s_disc.as_ptr());
+                }
+            }
+
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
 
             let inactive = self.history.get_inactive_for_kind(spec.kind, &st.items);
@@ -171,12 +202,30 @@ impl TrayManager {
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, IDM_EXIT, s_exit.as_ptr());
 
+            menu
+        }
+    }
+
+    pub fn track_and_destroy_menu(hwnd: HWND, menu: HMENU) -> usize {
+        if menu.is_null() {
+            return 0;
+        }
+        unsafe {
             let mut pt = POINT::default();
             GetCursorPos(&mut pt);
             SetForegroundWindow(hwnd);
-            TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, null());
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
+                pt.x,
+                pt.y,
+                0,
+                hwnd,
+                null(),
+            );
             PostMessageW(hwnd, WM_NULL, 0, 0);
             DestroyMenu(menu);
+            if cmd > 0 { cmd as usize } else { 0 }
         }
     }
 
@@ -187,13 +236,23 @@ impl TrayManager {
             self.menu_inactive_keys.clear();
             return;
         }
-        if cmd_id >= IDM_HIST_DEL_BASE {
+        if (IDM_HIST_DEL_BASE..IDM_DISCONNECT_BASE).contains(&cmd_id) {
             let idx = cmd_id - IDM_HIST_DEL_BASE;
             if let Some(key) = self.menu_inactive_keys.get(idx).cloned() {
                 self.history.remove_entry(kind, &key);
             }
             self.menu_inactive_keys.clear();
         }
+    }
+
+    pub fn take_disconnect_addr(&mut self, cmd_id: usize) -> Option<u64> {
+        if cmd_id < IDM_DISCONNECT_BASE {
+            return None;
+        }
+        let idx = cmd_id - IDM_DISCONNECT_BASE;
+        let addr = self.menu_disconnect_addrs.get(idx).copied().filter(|&a| a != 0);
+        self.menu_disconnect_addrs.clear();
+        addr
     }
 
     pub fn shutdown(&mut self) {

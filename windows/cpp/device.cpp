@@ -163,6 +163,7 @@ void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const Devi
             if (clean.activeAudio) existing.activeAudio = true;
             if (clean.connected) existing.connected = true;
             if (clean.charging) existing.charging = true;
+            if (clean.bthAddr != 0 && existing.bthAddr == 0) existing.bthAddr = clean.bthAddr;
             if (existing.name.empty() && !clean.name.empty()) existing.name = clean.name;
             if (existing.key.empty()) existing.key = clean.key;
             return;

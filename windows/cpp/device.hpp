@@ -24,6 +24,7 @@ struct DeviceEntry {
     std::wstring key;
     std::wstring name;
     std::wstring containerId;
+    uint64_t bthAddr = 0;
     int percent = -1;
     bool charging = false;
     bool activeAudio = false;

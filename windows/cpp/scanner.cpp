@@ -14,7 +14,9 @@ extern "C" {
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <cwctype>
 #include <unordered_map>
 #include <vector>
 
@@ -22,6 +24,9 @@ namespace {
 
 constexpr DEVPROPKEY kPropBluetoothBattery = {
     {0x104EA319, 0x6EE2, 0x4701, {0xBD, 0x47, 0x8D, 0xDB, 0xF4, 0x25, 0xBB, 0xE5}}, 2
+};
+constexpr DEVPROPKEY kPropBluetoothAddress = {
+    {0x2BD67D8B, 0x8BEB, 0x48D5, {0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A}}, 1
 };
 constexpr DEVPROPKEY kPropBluetoothCoD = {
     {0x2BD67D8B, 0x8BEB, 0x48D5, {0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A}}, 10
@@ -108,6 +113,34 @@ std::wstring FormatGuidLower(const GUID& g) {
     return ToLower(buf);
 }
 
+uint64_t ParseBluetoothAddress(const std::wstring& raw) {
+    wchar_t hex[13]{};
+    size_t count = 0;
+    for (wchar_t ch : raw) {
+        if (ch == L':' || ch == L'-' || ch == L' ') continue;
+        if (!std::iswxdigit(ch) || count >= 12) return 0;
+        hex[count++] = ch;
+    }
+    if (count != 12) return 0;
+    return std::wcstoull(hex, nullptr, 16);
+}
+
+uint64_t ExtractBthAddrFromInstanceId(HDEVINFO set, SP_DEVINFO_DATA& dev) {
+    wchar_t inst[256]{};
+    if (!SetupDiGetDeviceInstanceIdW(set, &dev, inst, _countof(inst), nullptr)) return 0;
+    const std::wstring up = ToLower(inst);
+    for (const wchar_t* tag : {L"dev_", L"bluetoothdevice_"}) {
+        size_t pos = up.find(tag);
+        if (pos == std::wstring::npos) continue;
+        pos += std::wcslen(tag);
+        if (pos + 12 <= up.size()) {
+            const uint64_t addr = ParseBluetoothAddress(up.substr(pos, 12));
+            if (addr != 0) return addr;
+        }
+    }
+    return 0;
+}
+
 ActiveAudioInfo QueryActiveAudioEndpoint() {
     ActiveAudioInfo info{};
     IMMDeviceEnumerator* enumerator = nullptr;
@@ -181,7 +214,6 @@ bool ReadDevPropByte(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key, 
     return true;
 }
 
-// Tri-state: 1 = connected, -1 = explicitly disconnected, 0 = property absent
 int ReadDevPropBool(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& key) {
     DEVPROPTYPE type = 0;
     DEVPROP_BOOLEAN val = 0;
@@ -217,6 +249,12 @@ uint32_t ReadDevPropU32(HDEVINFO set, SP_DEVINFO_DATA& dev, const DEVPROPKEY& ke
     return (type == DEVPROP_TYPE_UINT32 && req >= sizeof(val)) ? val : 0;
 }
 
+uint64_t ResolveBluetoothAddress(HDEVINFO set, SP_DEVINFO_DATA& dev) {
+    uint64_t addr = ParseBluetoothAddress(ReadDevPropString(set, dev, kPropBluetoothAddress));
+    if (addr == 0) addr = ExtractBthAddrFromInstanceId(set, dev);
+    return addr;
+}
+
 std::wstring ResolveDevName(HDEVINFO set, SP_DEVINFO_DATA& dev) {
     std::wstring name = ReadDevPropString(set, dev, kPropFriendlyName);
     if (name.empty()) name = ReadDevPropString(set, dev, kPropDeviceDesc);
@@ -231,13 +269,14 @@ void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& au
         std::wstring name;
         std::wstring pnpClass;
         std::wstring containerId;
+        uint64_t bthAddr = 0;
         uint32_t cod = 0;
         int pct = -1;
         int nodeConn = 0;
     };
 
-    // Single pass: collect per-container Bluetooth connection state alongside battery nodes
     std::unordered_map<std::wstring, int> containerConn;
+    std::unordered_map<std::wstring, uint64_t> containerAddr;
     std::vector<RawCandidate> raw;
 
     SP_DEVINFO_DATA dev{};
@@ -245,10 +284,16 @@ void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& au
     for (DWORD i = 0; SetupDiEnumDeviceInfo(set.set, i, &dev); ++i) {
         const std::wstring cid = ReadDevPropGuid(set.set, dev, kPropContainerId);
         const int connState = ReadDevPropBool(set.set, dev, kPropIsConnected);
-        if (!cid.empty() && connState != 0) {
-            auto& slot = containerConn[cid];
-            if (connState > 0) slot = 1;
-            else if (slot == 0) slot = -1;
+        const uint64_t nodeAddr = ResolveBluetoothAddress(set.set, dev);
+        if (!cid.empty()) {
+            if (connState != 0) {
+                auto& slot = containerConn[cid];
+                if (connState > 0) slot = 1;
+                else if (slot == 0) slot = -1;
+            }
+            if (nodeAddr != 0 && containerAddr[cid] == 0) {
+                containerAddr[cid] = nodeAddr;
+            }
         }
 
         uint8_t pct = 0;
@@ -258,6 +303,7 @@ void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& au
         cand.name = ResolveDevName(set.set, dev);
         cand.pnpClass = ReadDevPropString(set.set, dev, kPropDeviceClass);
         cand.containerId = cid;
+        cand.bthAddr = nodeAddr;
         cand.cod = ReadDevPropU32(set.set, dev, kPropBluetoothCoD);
         cand.pct = pct;
         cand.nodeConn = connState;
@@ -266,9 +312,14 @@ void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& au
 
     for (const auto& cand : raw) {
         int state = cand.nodeConn;
+        uint64_t addr = cand.bthAddr;
         if (!cand.containerId.empty()) {
             const auto it = containerConn.find(cand.containerId);
             if (it != containerConn.end()) state = it->second;
+            if (addr == 0) {
+                const auto ait = containerAddr.find(cand.containerId);
+                if (ait != containerAddr.end()) addr = ait->second;
+            }
         }
         // Skip paired Bluetooth devices explicitly reported as disconnected (stale cached battery)
         if (state < 0) continue;
@@ -280,6 +331,7 @@ void ScanPnpBluetooth(std::array<DeviceState, 3>& out, const ActiveAudioInfo& au
         DeviceEntry entry{};
         entry.name = cand.name;
         entry.containerId = cand.containerId;
+        entry.bthAddr = addr;
         entry.percent = cand.pct;
         entry.activeAudio = isActive;
         entry.connected = (state > 0);
@@ -350,6 +402,7 @@ void ScanBleGatt(std::array<DeviceState, 3>& out, const ActiveAudioInfo& audio) 
                     const std::wstring name = ResolveDevName(set.set, dev);
                     const std::wstring cls = ReadDevPropString(set.set, dev, kPropDeviceClass);
                     const std::wstring cid = ReadDevPropGuid(set.set, dev, kPropContainerId);
+                    const uint64_t addr = ResolveBluetoothAddress(set.set, dev);
                     const uint32_t cod = ReadDevPropU32(set.set, dev, kPropBluetoothCoD);
                     const bool isActive = MatchesActiveAudio(audio, cid, name);
                     DeviceKind kind = ClassifyDevice(name, cls, cod);
@@ -358,6 +411,7 @@ void ScanBleGatt(std::array<DeviceState, 3>& out, const ActiveAudioInfo& audio) 
                     DeviceEntry entry{};
                     entry.name = name;
                     entry.containerId = cid;
+                    entry.bthAddr = addr;
                     entry.percent = val->Data[0];
                     entry.activeAudio = isActive;
                     entry.connected = true;
@@ -460,6 +514,14 @@ void ScanUsbHidPower(std::array<DeviceState, 3>& out, const ActiveAudioInfo& aud
     }
 }
 
+struct BluetoothFindRadioParams {
+    DWORD dwSize;
+};
+
+using FnFindFirstRadio = HANDLE (WINAPI*)(const BluetoothFindRadioParams*, HANDLE*);
+using FnFindNextRadio = BOOL (WINAPI*)(HANDLE, HANDLE*);
+using FnFindRadioClose = BOOL (WINAPI*)(HANDLE);
+
 } // namespace
 
 std::array<DeviceState, 3> ScanAllDevices() {
@@ -470,4 +532,38 @@ std::array<DeviceState, 3> ScanAllDevices() {
     ScanUsbHidPower(out, audio);
     FinalizeDevices(out);
     return out;
+}
+
+bool DisconnectBluetoothDevice(uint64_t bthAddr) {
+    if (bthAddr == 0) return false;
+    ModuleGuard dll(LoadLibraryExW(L"BluetoothAPIs.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
+    if (!dll.mod) return false;
+
+    auto findFirst = reinterpret_cast<FnFindFirstRadio>(GetProcAddress(dll.mod, "BluetoothFindFirstRadio"));
+    auto findNext = reinterpret_cast<FnFindNextRadio>(GetProcAddress(dll.mod, "BluetoothFindNextRadio"));
+    auto findClose = reinterpret_cast<FnFindRadioClose>(GetProcAddress(dll.mod, "BluetoothFindRadioClose"));
+    if (!findFirst || !findNext || !findClose) return false;
+
+    BluetoothFindRadioParams params{sizeof(BluetoothFindRadioParams)};
+    HANDLE hRadio = nullptr;
+    HANDLE hFind = findFirst(&params, &hRadio);
+    if (!hFind) return false;
+
+    // IOCTL_BTH_DISCONNECT_DEVICE (FILE_DEVICE_BLUETOOTH=0x41, function=0x03, METHOD_BUFFERED)
+    constexpr DWORD kIoctlBthDisconnectDevice = 0x0041000C;
+    bool disconnected = false;
+    do {
+        if (hRadio) {
+            DWORD bytes = 0;
+            if (DeviceIoControl(hRadio, kIoctlBthDisconnectDevice, &bthAddr, sizeof(bthAddr),
+                                nullptr, 0, &bytes, nullptr)) {
+                disconnected = true;
+            }
+            CloseHandle(hRadio);
+            hRadio = nullptr;
+        }
+    } while (findNext(hFind, &hRadio));
+
+    findClose(hFind);
+    return disconnected;
 }

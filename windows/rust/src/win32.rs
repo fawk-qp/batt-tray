@@ -75,6 +75,7 @@ pub const MF_SEPARATOR: u32 = 0x0000_0800;
 pub const TPM_LEFTALIGN: u32 = 0x0000;
 pub const TPM_RIGHTBUTTON: u32 = 0x0002;
 pub const TPM_BOTTOMALIGN: u32 = 0x0020;
+pub const TPM_RETURNCMD: u32 = 0x0100;
 
 pub const HKEY_CURRENT_USER: HKEY = 0x8000_0001usize as HKEY;
 pub const RRF_RT_REG_SZ: u32 = 0x0000_0002;
@@ -93,6 +94,7 @@ pub const OPEN_EXISTING: u32 = 3;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+pub const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
 pub const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
 
@@ -296,6 +298,11 @@ pub struct BTH_LE_GATT_CHARACTERISTIC_VALUE {
 }
 
 #[repr(C)]
+pub struct BLUETOOTH_FIND_RADIO_PARAMS {
+    pub dwSize: u32,
+}
+
+#[repr(C)]
 pub struct PROPVARIANT {
     pub vt: u16,
     pub r1: u16,
@@ -384,6 +391,14 @@ pub type FnBluetoothGattGetCharacteristicValue = unsafe extern "system" fn(
     u32,
 ) -> HRESULT;
 
+pub type FnBluetoothFindFirstRadio = unsafe extern "system" fn(
+    *const BLUETOOTH_FIND_RADIO_PARAMS,
+    *mut HANDLE,
+) -> HANDLE;
+
+pub type FnBluetoothFindNextRadio = unsafe extern "system" fn(HANDLE, *mut HANDLE) -> BOOL;
+pub type FnBluetoothFindRadioClose = unsafe extern "system" fn(HANDLE) -> BOOL;
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn GetCurrentProcess() -> HANDLE;
@@ -411,6 +426,26 @@ extern "system" {
     pub fn CreateMutexW(lpAttr: *mut c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
     pub fn GetLastError() -> u32;
     pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+    pub fn DuplicateHandle(
+        hSourceProcessHandle: HANDLE,
+        hSourceHandle: HANDLE,
+        hTargetProcessHandle: HANDLE,
+        lpTargetHandle: *mut HANDLE,
+        dwDesiredAccess: u32,
+        bInheritHandle: BOOL,
+        dwOptions: u32,
+    ) -> BOOL;
+    pub fn Sleep(dwMilliseconds: u32);
+    pub fn DeviceIoControl(
+        hDevice: HANDLE,
+        dwIoControlCode: u32,
+        lpInBuffer: *const c_void,
+        nInBufferSize: u32,
+        lpOutBuffer: *mut c_void,
+        nOutBufferSize: u32,
+        lpBytesReturned: *mut u32,
+        lpOverlapped: *mut c_void,
+    ) -> BOOL;
     pub fn CreateEventW(lpAttr: *mut c_void, bManualReset: BOOL, bInitialState: BOOL, lpName: *const u16) -> HANDLE;
     pub fn SetEvent(hEvent: HANDLE) -> BOOL;
     pub fn WaitForMultipleObjects(nCount: u32, lpHandles: *const HANDLE, bWaitAll: BOOL, dwMilliseconds: u32) -> u32;
@@ -527,6 +562,13 @@ extern "system" {
 extern "system" {
     pub fn SetupDiGetClassDevsW(ClassGuid: *const GUID, Enumerator: *const u16, hwndParent: HWND, Flags: u32) -> HDEVINFO;
     pub fn SetupDiEnumDeviceInfo(DeviceInfoSet: HDEVINFO, MemberIndex: u32, DeviceInfoData: *mut SP_DEVINFO_DATA) -> BOOL;
+    pub fn SetupDiGetDeviceInstanceIdW(
+        DeviceInfoSet: HDEVINFO,
+        DeviceInfoData: *mut SP_DEVINFO_DATA,
+        DeviceInstanceId: *mut u16,
+        DeviceInstanceIdSize: u32,
+        RequiredSize: *mut u32,
+    ) -> BOOL;
     pub fn SetupDiGetDevicePropertyW(
         DeviceInfoSet: HDEVINFO,
         DeviceInfoData: *mut SP_DEVINFO_DATA,

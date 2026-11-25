@@ -209,6 +209,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DestroyWindow(hwnd);
                     return 0;
                 default:
+                    if (cmd >= IDM_DISCONNECT_BASE) {
+                        const uint64_t addr = g_app->tray.TakeDisconnectAddr(cmd);
+                        if (addr != 0) {
+                            HANDLE dupEv = nullptr;
+                            if (g_app->scanEvent) {
+                                DuplicateHandle(GetCurrentProcess(), g_app->scanEvent, GetCurrentProcess(),
+                                                &dupEv, 0, FALSE, DUPLICATE_SAME_ACCESS);
+                            }
+                            std::thread([addr, dupEv]() {
+                                DisconnectBluetoothDevice(addr);
+                                if (dupEv) {
+                                    SetEvent(dupEv);
+                                    Sleep(1200);
+                                    SetEvent(dupEv);
+                                    CloseHandle(dupEv);
+                                }
+                            }).detach();
+                        }
+                        return 0;
+                    }
                     if (cmd >= IDM_HIST_CLEAR) {
                         g_app->tray.HandleMenuCommand(cmd);
                         return 0;

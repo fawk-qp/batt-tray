@@ -11,6 +11,7 @@ pub struct DeviceEntry {
     pub key: String,
     pub name: String,
     pub container_id: String,
+    pub bth_addr: u64,
     pub percent: i32,
     pub charging: bool,
     pub active_audio: bool,
@@ -189,6 +190,9 @@ pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, mut entry: 
             existing.active_audio |= entry.active_audio;
             existing.connected |= entry.connected;
             existing.charging |= entry.charging;
+            if entry.bth_addr != 0 && existing.bth_addr == 0 {
+                existing.bth_addr = entry.bth_addr;
+            }
             if existing.name.is_empty() && !entry.name.is_empty() {
                 existing.name = entry.name;
             }
