@@ -182,7 +182,10 @@ void DeviceHistory::Save() const {
     EnsureDirRecursive(dir);
 
     struct stat dirSt{};
-    if (lstat(dir.c_str(), &dirSt) != 0 || !S_ISDIR(dirSt.st_mode)) return;
+    if (lstat(dir.c_str(), &dirSt) != 0 || !S_ISDIR(dirSt.st_mode) ||
+        dirSt.st_uid != static_cast<uid_t>(getuid()) || (dirSt.st_mode & 077) != 0) {
+        return;
+    }
 
     std::string payload;
     payload.reserve(items_.size() * 80);

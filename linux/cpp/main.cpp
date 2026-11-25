@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -32,10 +34,26 @@ int AcquireInstanceLock() {
     if (xdg && xdg[0] == '/') {
         lockPath = std::string(xdg) + "/batt-tray.lock";
     } else {
-        lockPath = "/tmp/batt-tray-" + std::to_string(static_cast<unsigned long>(getuid())) + ".lock";
+        const char* cache = std::getenv("XDG_CACHE_HOME");
+        std::string base;
+        if (cache && cache[0] == '/') {
+            base = cache;
+        } else {
+            const char* home = std::getenv("HOME");
+            base = (home && home[0] == '/') ? std::string(home) + "/.cache" : std::string();
+        }
+        if (base.empty()) return -1;
+        const std::string dir = base + "/batt-tray";
+        mkdir(dir.c_str(), 0700);
+        lockPath = dir + "/batt-tray.lock";
     }
     const int fd = open(lockPath.c_str(), O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return -1;
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != static_cast<uid_t>(getuid())) {
+        close(fd);
+        return -1;
+    }
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         close(fd);
         return -2;

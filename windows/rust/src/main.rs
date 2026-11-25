@@ -191,13 +191,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             });
             0
         }
-        WM_COMMAND => {
-            if handle_menu_cmd(hwnd, wparam & 0xFFFF) {
-                0
-            } else {
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-        }
         WM_DEVICECHANGE => {
             if wparam == DBT_DEVNODES_CHANGED || wparam == DBT_DEVICEARRIVAL || wparam == DBT_DEVICEREMOVECOMPLETE {
                 SetCoalescableTimer(hwnd, TIMER_DEBOUNCE, DEBOUNCE_MS, null(), COALESCE_TOLERANCE_MS);
@@ -216,21 +209,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         WM_SETTINGCHANGE => {
-            if lparam != 0 {
-                let ptr = lparam as *const u16;
-                let mut len = 0usize;
-                while len < 64 && *ptr.add(len) != 0 {
-                    len += 1;
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    if app.tray.refresh_theme() {
+                        trim_idle_working_set();
+                    }
                 }
-                if String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len)) == "ImmersiveColorSet" {
-                    APP.with(|cell| {
-                        if let Some(app) = cell.borrow_mut().as_mut() {
-                            app.tray.refresh_theme();
-                            trim_idle_working_set();
-                        }
-                    });
-                }
-            }
+            });
             0
         }
         WM_DPICHANGED | WM_DISPLAYCHANGE => {

@@ -3,12 +3,17 @@ Description=Wireless peripherals battery tray indicator
 After=graphical-session.target
 
 [Service]
-ExecStart=%h/.local/bin/batt-tray-linux-cpp
+ExecStart=%h/.local/bin/batt-tray
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
 LockPersonality=yes
 RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
 UMask=0077
 
 [Install]

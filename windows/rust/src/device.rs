@@ -42,7 +42,13 @@ pub const SLOT_SPECS: [SlotSpec; 3] = [
 
 pub fn sanitize_device_text(raw: &str, max_chars: usize) -> String {
     raw.chars()
-        .filter(|&c| !c.is_control())
+        .filter(|&c| {
+            !c.is_control()
+                && !(('\u{200B}'..='\u{200F}').contains(&c)
+                    || ('\u{202A}'..='\u{202E}').contains(&c)
+                    || ('\u{2066}'..='\u{2069}').contains(&c)
+                    || c == '\u{FEFF}')
+        })
         .take(max_chars)
         .collect::<String>()
         .trim()
@@ -201,6 +207,9 @@ pub fn store_candidate(out: &mut [DeviceState; 3], kind: DeviceKind, mut entry: 
             }
             return;
         }
+    }
+    if items.len() >= 16 {
+        return;
     }
     items.push(entry);
 }

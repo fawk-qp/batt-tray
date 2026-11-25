@@ -3,13 +3,16 @@ setlocal
 cd /d "%~dp0"
 
 if not exist dist mkdir dist
+if not exist "%TEMP%\batt-tray-cpp" mkdir "%TEMP%\batt-tray-cpp"
 
 where cl >nul 2>nul
 if %errorlevel%==0 (
     echo [cpp] building windows/cpp...
-    pushd windows\cpp
-    cl /nologo /O2 /MT /EHsc /W4 device.cpp scanner.cpp icon.cpp tray.cpp main.cpp /Fe:..\..\dist\batt-tray-win-cpp.exe /Fo:%TEMP%\batt-tray-cpp-
-    popd
+    rc /nologo /fo windows\app.res windows\app.rc
+    cl /nologo /std:c++17 /O2 /MT /utf-8 /EHsc /GS /guard:cf /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 ^
+       windows\cpp\*.cpp windows\app.res /Fe:dist\batt-tray-win-cpp.exe /Fo:%TEMP%\batt-tray-cpp\ ^
+       /link /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /GUARD:CF /OPT:REF /OPT:ICF /MANIFEST:NO ^
+       user32.lib gdi32.lib shell32.lib advapi32.lib setupapi.lib hid.lib d2d1.lib dwrite.lib windowscodecs.lib ole32.lib
 ) else (
     echo [cpp] cl.exe not found, skipping C++ build
 )
@@ -17,6 +20,7 @@ if %errorlevel%==0 (
 where cargo >nul 2>nul
 if %errorlevel%==0 (
     echo [rust] building windows/rust...
+    set "RUSTFLAGS=-C control-flow-guard=yes -C link-arg=%~dp0windows\app.res"
     pushd windows\rust
     cargo build --release
     copy /y target\release\batt-tray-win.exe ..\..\dist\batt-tray-win-rust.exe >nul
@@ -27,4 +31,3 @@ if %errorlevel%==0 (
 
 echo Done. Binaries in dist\
 endlocal
-x`

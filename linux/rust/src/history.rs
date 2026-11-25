@@ -160,7 +160,11 @@ impl DeviceHistory {
         let Ok(dir_meta) = fs::symlink_metadata(&dir) else {
             return;
         };
-        if !dir_meta.file_type().is_dir() {
+        use std::os::unix::fs::MetadataExt;
+        if !dir_meta.file_type().is_dir()
+            || dir_meta.uid() != unsafe { crate::dbus_ffi::getuid() }
+            || (dir_meta.mode() & 0o077) != 0
+        {
             return;
         }
 

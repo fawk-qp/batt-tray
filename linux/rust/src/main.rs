@@ -8,7 +8,7 @@ use dbus_ffi::*;
 use device::{DeviceEntry, DeviceState};
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::io::AsRawFd;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
@@ -16,10 +16,29 @@ use std::time::{Duration, Instant};
 const POLL_FALLBACK: Duration = Duration::from_secs(60);
 const DEBOUNCE: Duration = Duration::from_millis(800);
 
+fn apply_process_hardening() {
+    unsafe {
+        umask(0o077);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
+}
+
 fn acquire_lock() -> Result<Option<File>, ()> {
     let path = match std::env::var("XDG_RUNTIME_DIR") {
         Ok(dir) if dir.starts_with('/') => format!("{}/batt-tray.lock", dir),
-        _ => format!("/tmp/batt-tray-{}.lock", unsafe { getuid() }),
+        _ => {
+            let base = match std::env::var("XDG_CACHE_HOME") {
+                Ok(dir) if dir.starts_with('/') => dir,
+                _ => match std::env::var("HOME") {
+                    Ok(home) if home.starts_with('/') => format!("{}/.cache", home),
+                    _ => return Ok(None),
+                },
+            };
+            let dir = format!("{}/batt-tray", base);
+            let _ = std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+            format!("{}/batt-tray.lock", dir)
+        }
     };
     let file = match OpenOptions::new()
         .read(true)
@@ -32,6 +51,10 @@ fn acquire_lock() -> Result<Option<File>, ()> {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
+    use std::os::unix::fs::MetadataExt;
+    if !file.metadata().map(|m| m.is_file() && m.uid() == unsafe { getuid() }).unwrap_or(false) {
+        return Ok(None);
+    }
     if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
         return Err(());
     }
@@ -69,6 +92,7 @@ unsafe extern "C" fn sys_filter(_: *mut DBusConnection, msg: *mut DBusMessage, _
 }
 
 fn main() {
+    apply_process_hardening();
     let mut hide_offline = false;
     let mut demo_mode = false;
     for arg in std::env::args().skip(1) {

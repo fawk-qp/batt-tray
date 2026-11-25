@@ -9,13 +9,16 @@ mkdir -p "$OUT"
 DBUS_FLAGS="$(pkg-config --cflags --libs dbus-1)"
 
 echo "==> linux/cpp"
-g++ -std=c++17 -O2 -s -Wall -Wextra \
-    cpp/main.cpp cpp/device.cpp cpp/scanner.cpp cpp/sni.cpp \
-    -o "$OUT/batt-tray-linux-cpp" $DBUS_FLAGS
+g++ -std=c++17 -Os -fno-exceptions -fno-rtti -flto -ffunction-sections -fdata-sections \
+    -fPIE -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror \
+    cpp/*.cpp -o "$OUT/batt-tray-linux-cpp" $DBUS_FLAGS \
+    -pie -Wl,--gc-sections,-z,relro,-z,now -s
 
 echo "==> linux/rust"
-(cd rust && cargo build --release)
-cp rust/target/release/batt-tray "$OUT/batt-tray-linux-rust"
+(cd rust && \
+    RUSTFLAGS="-C relocation-model=pie -C link-arg=-Wl,-z,relro,-z,now" \
+    cargo build --release)
+cp rust/target/release/batt-tray-linux "$OUT/batt-tray-linux-rust"
 
 echo "Done:"
 ls -la "$OUT"/batt-tray-linux-*

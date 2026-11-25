@@ -111,6 +111,7 @@ void ScanUPower(DBusConnection* sys, std::array<DeviceState, 3>& out) {
             dbus_message_iter_next(&arr);
         }
     }
+    if (paths.size() > 64) paths.resize(64);
 
     for (const auto& path : paths) {
         DbusMsg req(dbus_message_new_method_call(

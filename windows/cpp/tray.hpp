@@ -24,8 +24,8 @@ public:
     bool Init(HWND hwnd);
     void ReaddIcons();
     bool Update(const std::array<DeviceState, 3>& states);
-    void RefreshTheme();
-    void ShowContextMenu(HWND hwnd, UINT uid);
+    bool RefreshTheme();
+    UINT ShowContextMenu(HWND hwnd, UINT uid);
     void HandleMenuCommand(UINT cmdId);
     uint64_t TakeDisconnectAddr(UINT cmdId);
     void Shutdown();

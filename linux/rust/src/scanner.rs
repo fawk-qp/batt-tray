@@ -58,6 +58,7 @@ unsafe fn scan_upower(sys: *mut DBusConnection, out: &mut [DeviceState; 3]) {
             dbus_message_iter_next(&mut arr);
         }
     }
+    paths.truncate(64);
 
     for p in paths {
         let cp = cstr(&p);

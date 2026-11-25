@@ -70,6 +70,10 @@ void TrimIdleWorkingSet() {
 class AudioChangeClient final : public IMMNotificationClient {
 public:
     explicit AudioChangeClient(HANDLE scanEvent) : scanEvent_(scanEvent) {}
+    ~AudioChangeClient() {
+        HANDLE h = scanEvent_.exchange(nullptr, std::memory_order_acq_rel);
+        if (h) CloseHandle(h);
+    }
 
     ULONG STDMETHODCALLTYPE AddRef() override {
         return ++ref_;
@@ -107,7 +111,10 @@ public:
     HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 
-    void Detach() { scanEvent_.store(nullptr, std::memory_order_release); }
+    void Detach() {
+        HANDLE h = scanEvent_.exchange(nullptr, std::memory_order_acq_rel);
+        if (h) CloseHandle(h);
+    }
 
 private:
     void Trigger() {
@@ -131,6 +138,45 @@ struct AppContext {
 
 AppContext* g_app = nullptr;
 
+void HandleTrayMenuCommand(HWND hwnd, UINT cmd) {
+    switch (cmd) {
+        case IDM_REFRESH:
+            if (g_app->scanEvent) SetEvent(g_app->scanEvent);
+            return;
+        case IDM_AUTOSTART:
+            TrayManager::ToggleAutostart();
+            return;
+        case IDM_EXIT:
+            DestroyWindow(hwnd);
+            return;
+        default:
+            break;
+    }
+    if (cmd >= IDM_DISCONNECT_BASE) {
+        const uint64_t addr = g_app->tray.TakeDisconnectAddr(cmd);
+        if (addr != 0) {
+            HANDLE dupEv = nullptr;
+            if (g_app->scanEvent) {
+                DuplicateHandle(GetCurrentProcess(), g_app->scanEvent, GetCurrentProcess(),
+                                &dupEv, 0, FALSE, DUPLICATE_SAME_ACCESS);
+            }
+            std::thread([addr, dupEv]() {
+                DisconnectBluetoothDevice(addr);
+                if (dupEv) {
+                    SetEvent(dupEv);
+                    Sleep(1200);
+                    SetEvent(dupEv);
+                    CloseHandle(dupEv);
+                }
+            }).detach();
+        }
+        return;
+    }
+    if (cmd >= IDM_HIST_CLEAR) {
+        g_app->tray.HandleMenuCommand(cmd);
+    }
+}
+
 void WorkerLoop(HWND hwnd, AppContext* app) {
     const HRESULT comHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
@@ -139,7 +185,10 @@ void WorkerLoop(HWND hwnd, AppContext* app) {
     if (SUCCEEDED(comHr) &&
         SUCCEEDED(CoCreateInstance(kClsidMMDeviceEnumerator, nullptr, CLSCTX_INPROC_SERVER,
             kIidIMMDeviceEnumerator, reinterpret_cast<void**>(&audioEnum))) && audioEnum) {
-        audioClient = new AudioChangeClient(app->scanEvent);
+        HANDLE audioEvent = nullptr;
+        DuplicateHandle(GetCurrentProcess(), app->scanEvent, GetCurrentProcess(),
+                        &audioEvent, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        audioClient = new AudioChangeClient(audioEvent);
         if (FAILED(audioEnum->RegisterEndpointNotificationCallback(audioClient))) {
             audioClient->Release();
             audioClient = nullptr;
@@ -180,7 +229,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_APP_TRAY:
             if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
-                g_app->tray.ShowContextMenu(hwnd, static_cast<UINT>(wParam));
+                const UINT cmd = g_app->tray.ShowContextMenu(hwnd, static_cast<UINT>(wParam));
+                if (cmd != 0) HandleTrayMenuCommand(hwnd, cmd);
             }
             return 0;
 
@@ -194,48 +244,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 TrimIdleWorkingSet();
             }
             return 0;
-        }
-
-        case WM_COMMAND: {
-            const UINT cmd = LOWORD(wParam);
-            switch (cmd) {
-                case IDM_REFRESH:
-                    if (g_app->scanEvent) SetEvent(g_app->scanEvent);
-                    return 0;
-                case IDM_AUTOSTART:
-                    TrayManager::ToggleAutostart();
-                    return 0;
-                case IDM_EXIT:
-                    DestroyWindow(hwnd);
-                    return 0;
-                default:
-                    if (cmd >= IDM_DISCONNECT_BASE) {
-                        const uint64_t addr = g_app->tray.TakeDisconnectAddr(cmd);
-                        if (addr != 0) {
-                            HANDLE dupEv = nullptr;
-                            if (g_app->scanEvent) {
-                                DuplicateHandle(GetCurrentProcess(), g_app->scanEvent, GetCurrentProcess(),
-                                                &dupEv, 0, FALSE, DUPLICATE_SAME_ACCESS);
-                            }
-                            std::thread([addr, dupEv]() {
-                                DisconnectBluetoothDevice(addr);
-                                if (dupEv) {
-                                    SetEvent(dupEv);
-                                    Sleep(1200);
-                                    SetEvent(dupEv);
-                                    CloseHandle(dupEv);
-                                }
-                            }).detach();
-                        }
-                        return 0;
-                    }
-                    if (cmd >= IDM_HIST_CLEAR) {
-                        g_app->tray.HandleMenuCommand(cmd);
-                        return 0;
-                    }
-                    break;
-            }
-            break;
         }
 
         case WM_DEVICECHANGE:
@@ -252,8 +260,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_SETTINGCHANGE:
-            if (lParam && std::wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0) {
-                g_app->tray.RefreshTheme();
+            if (g_app->tray.RefreshTheme()) {
                 TrimIdleWorkingSet();
             }
             return 0;

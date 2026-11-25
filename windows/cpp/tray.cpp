@@ -125,15 +125,16 @@ bool TrayManager::Update(const std::array<DeviceState, 3>& states) {
     return anyRendered;
 }
 
-void TrayManager::RefreshTheme() {
+bool TrayManager::RefreshTheme() {
     const bool light = IsTaskbarLightTheme();
-    if (light == lightTheme_) return;
+    if (light == lightTheme_) return false;
     lightTheme_ = light;
     const int iconSize = GetTaskbarIconSize();
     for (size_t i = 0; i < 3; ++i) {
         ApplySlot(i, false, iconSize);
     }
     ShutdownIconRenderer();
+    return true;
 }
 
 void TrayManager::ApplySlot(size_t idx, bool add, int iconSize) {
@@ -169,7 +170,7 @@ void TrayManager::ApplySlot(size_t idx, bool add, int iconSize) {
     };
 }
 
-void TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
+UINT TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
     menuSlot_ = 0;
     const auto& specs = GetSlotSpecs();
     for (size_t i = 0; i < specs.size(); ++i) {
@@ -182,7 +183,7 @@ void TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
     menuDisconnectAddrs_.clear();
 
     HMENU menu = CreatePopupMenu();
-    if (!menu) return;
+    if (!menu) return 0;
 
     const std::wstring header = FormatMenuHeader(specs[menuSlot_], states_[menuSlot_]);
     AppendMenuW(menu, MF_STRING | MF_GRAYED, IDM_HEADER, header.c_str());
@@ -249,9 +250,11 @@ void TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
     POINT pt{};
     GetCursorPos(&pt);
     SetForegroundWindow(hwnd);
-    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
+    const UINT cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD,
+                                    pt.x, pt.y, 0, hwnd, nullptr);
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(menu);
+    return cmd;
 }
 
 void TrayManager::HandleMenuCommand(UINT cmdId) {
@@ -296,10 +299,19 @@ void TrayManager::Shutdown() {
 }
 
 bool TrayManager::IsAutostartEnabled() {
-    DWORD type = 0;
-    DWORD cb = 0;
-    const LONG rc = RegGetValueW(HKEY_CURRENT_USER, kRunSubkey, kRunValue, RRF_RT_REG_SZ, &type, nullptr, &cb);
-    return rc == ERROR_SUCCESS && cb > sizeof(wchar_t);
+    wchar_t buf[1024]{};
+    DWORD cb = sizeof(buf);
+    const LONG rc = RegGetValueW(HKEY_CURRENT_USER, kRunSubkey, kRunValue, RRF_RT_REG_SZ, nullptr, buf, &cb);
+    if (rc != ERROR_SUCCESS) return false;
+
+    std::wstring val(buf);
+    while (!val.empty() && (val.back() == L'"' || val.back() == L' ')) val.pop_back();
+    size_t start = 0;
+    while (start < val.size() && (val[start] == L'"' || val[start] == L' ')) ++start;
+    val.erase(0, start);
+
+    const std::wstring exe = GetCurrentExePath();
+    return !exe.empty() && _wcsicmp(val.c_str(), exe.c_str()) == 0;
 }
 
 bool TrayManager::ToggleAutostart() {

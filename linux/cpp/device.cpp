@@ -75,6 +75,26 @@ std::string SanitizeDeviceText(const std::string& s, size_t maxChars) {
             ++i;
             continue;
         }
+        // Reject overlong forms, UTF-16 surrogates and code points beyond U+10FFFF.
+        const unsigned char b1 = static_cast<unsigned char>(s[i + 1]);
+        if ((b == 0xE0u && (b1 < 0xA0u || b1 > 0xBFu)) ||
+            (b == 0xEDu && (b1 < 0x80u || b1 > 0x9Fu)) ||
+            (b == 0xF0u && (b1 < 0x90u || b1 > 0xBFu)) ||
+            (b == 0xF4u && (b1 < 0x80u || b1 > 0x8Fu))) {
+            ++i;
+            continue;
+        }
+        // Drop bidi controls and zero-width characters (U+200B..200F, U+202A..202E, U+2066..2069, U+FEFF).
+        if (len == 3) {
+            const unsigned cp = ((b & 0x0Fu) << 12) |
+                                ((static_cast<unsigned char>(s[i + 1]) & 0x3Fu) << 6) |
+                                (static_cast<unsigned char>(s[i + 2]) & 0x3Fu);
+            if ((cp >= 0x200Bu && cp <= 0x200Fu) || (cp >= 0x202Au && cp <= 0x202Eu) ||
+                (cp >= 0x2066u && cp <= 0x2069u) || cp == 0xFEFFu) {
+                i += len;
+                continue;
+            }
+        }
         out.append(s, i, len);
         i += len;
         ++chars;
@@ -142,7 +162,7 @@ void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const std:
                 break;
             }
         }
-        if (!exists) {
+        if (!exists && dst.items.size() < 16) {
             dst.items.push_back({key, clean, percent, charging});
         }
     }

@@ -2,6 +2,7 @@ use crate::device::{DeviceEntry, DeviceState, SLOT_SPECS};
 use crate::history::DeviceHistory;
 use crate::icon::{create_battery_tray_icon, get_taskbar_icon_size, is_taskbar_light_theme};
 use crate::win32::*;
+use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
 pub const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -99,16 +100,17 @@ impl TrayManager {
         any_rendered
     }
 
-    pub fn refresh_theme(&mut self) {
+    pub fn refresh_theme(&mut self) -> bool {
         let light = is_taskbar_light_theme();
         if light == self.light_theme {
-            return;
+            return false;
         }
         self.light_theme = light;
         let icon_size = get_taskbar_icon_size();
         for i in 0..3 {
             self.apply_slot(i, false, icon_size);
         }
+        true
     }
 
     // Builds the popup HMENU without running TrackPopupMenu so RefCell borrows can be released before the modal loop.
@@ -398,7 +400,24 @@ pub fn is_autostart_enabled() -> bool {
     let rc = unsafe {
         RegGetValueW(HKEY_CURRENT_USER, subkey.as_ptr(), val.as_ptr(), RRF_RT_REG_SZ, &mut ty, null_mut(), &mut cb)
     };
-    rc == ERROR_SUCCESS && cb > 2
+    if rc != ERROR_SUCCESS || cb < 2 {
+        return false;
+    }
+    let mut buf = vec![0u16; (cb as usize / 2).max(1)];
+    cb = (buf.len() * 2) as u32;
+    let rc = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, subkey.as_ptr(), val.as_ptr(), RRF_RT_REG_SZ, &mut ty, buf.as_mut_ptr() as *mut c_void, &mut cb)
+    };
+    if rc != ERROR_SUCCESS {
+        return false;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let raw = String::from_utf16_lossy(&buf[..end]);
+    let stored = raw.trim().trim_matches('"').trim();
+    match current_exe_path() {
+        Some(exe) => stored.eq_ignore_ascii_case(exe.trim_matches('"').trim()),
+        None => false,
+    }
 }
 
 pub fn toggle_autostart() {

@@ -5,3 +5,4 @@ dist/
 *.pdb
 *.ilk
 .vscode/
+release_*/

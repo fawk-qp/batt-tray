@@ -5,7 +5,7 @@ Tray icons showing battery level for wireless mice, keyboards and headphones. On
 - Windows: native `NOTIFYICONDATA` icons rendered via GDI/Direct2D, battery read from PnP `DEVPKEY_Bluetooth_Battery` with a BLE GATT (`0x180F`/`0x2A19`) fallback.
 - Linux: `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` over raw libdbus — no GTK/Qt. Works on KDE Plasma, GNOME AppIndicator, Waybar/Hyprland/Sway, XFCE.
 
-Devices that drop off are kept in a small on-disk history (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be removed from the tray menu.
+Devices that drop off are kept in a small on-disk history (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be removed from the tray menu. The file is stored locally without encryption — it only holds device names and battery percentages, and you can delete it at any time.
 
 ## Platforms and binaries
 
@@ -55,3 +55,5 @@ Verify a download:
 sha256sum -c SHA256SUMS.txt
 gh attestation verify batt-tray-win-rust.exe -R fawk-qp/batt-tray
 ```
+
+`SHA256SUMS.txt` only proves the archive is intact; the root of trust for provenance is `gh attestation verify` against the repository's attestations.
