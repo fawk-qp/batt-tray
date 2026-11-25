@@ -2,7 +2,10 @@ dist/
 **/target/
 *.exe
 *.obj
+*.res
 *.pdb
 *.ilk
 .vscode/
 release_*/
+audit_*/
+test_*/

@@ -1,20 +1,11 @@
 # batt-tray
 
-Tray icons showing battery level for wireless mice, keyboards and headphones. One icon per device kind, tooltip on hover, right-click menu for refresh / autostart / exit.
+Small tray utility that shows battery level for wireless mice, keyboards and headphones. One tray icon per device kind; right-click for refresh, autostart and exit.
 
-- Windows: native `NOTIFYICONDATA` icons rendered via GDI/Direct2D, battery read from PnP `DEVPKEY_Bluetooth_Battery` with a BLE GATT (`0x180F`/`0x2A19`) fallback.
-- Linux: `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` over raw libdbus — no GTK/Qt. Works on KDE Plasma, GNOME AppIndicator, Waybar/Hyprland/Sway, XFCE.
+- Windows: `NOTIFYICONDATA` icons drawn with GDI. Battery comes from PnP `DEVPKEY_Bluetooth_Battery`, with a BLE GATT (`0x180F` / `0x2A19`) fallback.
+- Linux: `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` over raw libdbus, no GTK/Qt. Works on KDE, GNOME AppIndicator, Waybar/Hyprland/Sway, XFCE.
 
-Devices that drop off are kept in a small on-disk history (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be removed from the tray menu. The file is stored locally without encryption — it only holds device names and battery percentages, and you can delete it at any time.
-
-## Platforms and binaries
-
-| Platform | Language | Output |
-|---|---|---|
-| Windows | C++17 (MSVC) | `batt-tray-win-cpp.exe` |
-| Windows | Rust, no dependencies | `batt-tray-win-rust.exe` |
-| Linux | C++17 (libdbus-1) | `batt-tray-linux-cpp` |
-| Linux | Rust, no crates, raw libdbus FFI | `batt-tray-linux-rust` |
+Disconnected devices stay in a small history file (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be dropped from the tray menu. It is plaintext, you can just delete it.
 
 ## Build
 
@@ -43,17 +34,15 @@ systemctl --user daemon-reload
 systemctl --user enable --now batt-tray
 ```
 
-Flags: `--hide-offline` marks disconnected devices `Passive` instead of `Active`; `--demo` runs with synthetic devices and a demo history (no hardware or D-Bus session needed).
+Flags: `--hide-offline` marks disconnected devices as passive instead of dropping them, `--demo` runs on synthetic data without touching hardware or D-Bus.
 
 ## Releases
 
-`.github/workflows/build.yml` builds all four binaries on every push; a `v*` tag publishes them as a GitHub Release together with `SHA256SUMS.txt` and a build-provenance attestation.
-
-Verify a download:
+Pushing a `v*` tag builds all four binaries and publishes them with `SHA256SUMS.txt` plus a build provenance attestation. Check a download with:
 
 ```
 sha256sum -c SHA256SUMS.txt
 gh attestation verify batt-tray-win-rust.exe -R fawk-qp/batt-tray
 ```
 
-`SHA256SUMS.txt` only proves the archive is intact; the root of trust for provenance is `gh attestation verify` against the repository's attestations.
+`gh attestation verify` is the part that actually proves where the binary came from.
