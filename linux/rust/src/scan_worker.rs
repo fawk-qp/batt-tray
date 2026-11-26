@@ -19,7 +19,7 @@ pub struct ScanWorker {
 }
 
 impl ScanWorker {
-    pub fn start() -> Self {
+    pub fn start(allow_airpods_ble: bool) -> Self {
         let notify_fd = unsafe {
             let fd = eventfd(0, 0);
             if fd >= 0 {
@@ -39,7 +39,7 @@ impl ScanWorker {
         ));
 
         let shared_bg = Arc::clone(&shared);
-        let handle = thread::spawn(move || worker_loop(shared_bg, notify_fd));
+        let handle = thread::spawn(move || worker_loop(shared_bg, notify_fd, allow_airpods_ble));
 
         Self {
             notify_fd,
@@ -90,7 +90,7 @@ impl Drop for ScanWorker {
     }
 }
 
-fn worker_loop(shared: Arc<(Mutex<SharedState>, Condvar)>, notify_fd: i32) {
+fn worker_loop(shared: Arc<(Mutex<SharedState>, Condvar)>, notify_fd: i32, allow_airpods_ble: bool) {
     let mut bus = open_private_sys_bus();
     let (lock, cvar) = &*shared;
 
@@ -123,7 +123,7 @@ fn worker_loop(shared: Arc<(Mutex<SharedState>, Condvar)>, notify_fd: i32) {
             bus = open_private_sys_bus();
         }
 
-        let snap = scanner::scan_all_devices(bus);
+        let snap = scanner::scan_all_devices(bus, allow_airpods_ble);
         {
             let mut st = match lock.lock() {
                 Ok(g) => g,

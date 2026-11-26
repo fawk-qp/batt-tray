@@ -28,7 +28,9 @@ pub type FONTENUMPROCW = unsafe extern "system" fn(*const LOGFONTW, *const c_voi
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 pub const ERROR_FILE_EXISTS: u32 = 80;
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
+pub const ERROR_IO_PENDING: u32 = 997;
 pub const ERROR_SUCCESS: i32 = 0;
+pub const HIDP_STATUS_SUCCESS: i32 = 0x0011_0000;
 
 pub const WM_NULL: u32 = 0x0000;
 pub const WM_DESTROY: u32 = 0x0002;
@@ -101,6 +103,7 @@ pub const OPEN_EXISTING: u32 = 3;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+pub const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
 pub const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
@@ -392,6 +395,46 @@ pub struct BY_HANDLE_FILE_INFORMATION {
 }
 
 #[repr(C)]
+#[derive(Default)]
+pub struct OVERLAPPED {
+    pub Internal: usize,
+    pub InternalHigh: usize,
+    pub Offset: u32,
+    pub OffsetHigh: u32,
+    pub hEvent: HANDLE,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct HIDD_ATTRIBUTES {
+    pub Size: u32,
+    pub VendorID: u16,
+    pub ProductID: u16,
+    pub VersionNumber: u16,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct HIDP_CAPS {
+    pub Usage: u16,
+    pub UsagePage: u16,
+    pub InputReportByteLength: u16,
+    pub OutputReportByteLength: u16,
+    pub FeatureReportByteLength: u16,
+    pub Reserved: [u16; 17],
+    pub NumberLinkCollectionNodes: u16,
+    pub NumberInputButtonCaps: u16,
+    pub NumberInputValueCaps: u16,
+    pub NumberInputDataIndices: u16,
+    pub NumberOutputButtonCaps: u16,
+    pub NumberOutputValueCaps: u16,
+    pub NumberOutputDataIndices: u16,
+    pub NumberFeatureButtonCaps: u16,
+    pub NumberFeatureValueCaps: u16,
+    pub NumberFeatureDataIndices: u16,
+}
+
+#[repr(C)]
 pub struct MitigationFlagsPolicy {
     pub flags: u32,
 }
@@ -465,6 +508,20 @@ extern "system" {
         lpNumberOfBytesWritten: *mut u32,
         lpOverlapped: *mut c_void,
     ) -> BOOL;
+    pub fn ReadFile(
+        hFile: HANDLE,
+        lpBuffer: *mut c_void,
+        nNumberOfBytesToRead: u32,
+        lpNumberOfBytesRead: *mut u32,
+        lpOverlapped: *mut OVERLAPPED,
+    ) -> BOOL;
+    pub fn CancelIoEx(hFile: HANDLE, lpOverlapped: *mut OVERLAPPED) -> BOOL;
+    pub fn GetOverlappedResult(
+        hFile: HANDLE,
+        lpOverlapped: *mut OVERLAPPED,
+        lpNumberOfBytesTransferred: *mut u32,
+        bWait: BOOL,
+    ) -> BOOL;
     pub fn GetFileInformationByHandle(
         hFile: HANDLE,
         lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
@@ -497,6 +554,8 @@ extern "system" {
     ) -> BOOL;
     pub fn CreateEventW(lpAttr: *mut c_void, bManualReset: BOOL, bInitialState: BOOL, lpName: *const u16) -> HANDLE;
     pub fn SetEvent(hEvent: HANDLE) -> BOOL;
+    pub fn ResetEvent(hEvent: HANDLE) -> BOOL;
+    pub fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: u32) -> u32;
     pub fn WaitForMultipleObjects(nCount: u32, lpHandles: *const HANDLE, bWaitAll: BOOL, dwMilliseconds: u32) -> u32;
     pub fn LoadLibraryExW(lpLibFileName: *const u16, hFile: HANDLE, dwFlags: u32) -> HMODULE;
     pub fn GetProcAddress(hModule: HMODULE, lpProcName: *const i8) -> *const c_void;
@@ -655,6 +714,18 @@ extern "system" {
         DeviceInfoData: *mut SP_DEVINFO_DATA,
     ) -> BOOL;
     pub fn SetupDiDestroyDeviceInfoList(DeviceInfoSet: HDEVINFO) -> BOOL;
+}
+
+#[link(name = "hid")]
+extern "system" {
+    pub fn HidD_GetHidGuid(HidGuid: *mut GUID);
+    pub fn HidD_GetAttributes(HidDeviceObject: HANDLE, Attributes: *mut HIDD_ATTRIBUTES) -> BOOL;
+    pub fn HidD_GetPreparsedData(HidDeviceObject: HANDLE, PreparsedData: *mut *mut c_void) -> BOOL;
+    pub fn HidD_FreePreparsedData(PreparsedData: *mut c_void) -> BOOL;
+    pub fn HidP_GetCaps(PreparsedData: *mut c_void, Capabilities: *mut HIDP_CAPS) -> i32;
+    pub fn HidD_GetProductString(HidDeviceObject: HANDLE, Buffer: *mut c_void, BufferLength: u32) -> BOOL;
+    pub fn HidD_SetFeature(HidDeviceObject: HANDLE, ReportBuffer: *mut c_void, ReportBufferLength: u32) -> BOOL;
+    pub fn HidD_GetFeature(HidDeviceObject: HANDLE, ReportBuffer: *mut c_void, ReportBufferLength: u32) -> BOOL;
 }
 
 #[link(name = "ole32")]

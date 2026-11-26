@@ -915,16 +915,21 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
                 continue;
             }
             for d in &slot_state.items {
-                let dev_name = if d.name.is_empty() {
+                let raw_name = if d.name.is_empty() {
                     SLOT_SPECS[i].label
                 } else {
                     &d.name
                 };
-                let lvl = tracker.evaluate(i, dev_name, d.percent, d.charging, now_sec);
+                let alert_name = if raw_name.ends_with("%)") {
+                    raw_name.rfind(" (").map(|p| &raw_name[..p]).unwrap_or(raw_name)
+                } else {
+                    raw_name
+                };
+                let lvl = tracker.evaluate(i, alert_name, d.percent, d.charging, now_sec);
                 if lvl != AlertLevel::None {
                     pending_notifs.push((
                         updates[i].conn,
-                        dev_name.to_string(),
+                        alert_name.to_string(),
                         d.percent,
                         lvl == AlertLevel::Critical5,
                     ));

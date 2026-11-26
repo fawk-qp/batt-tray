@@ -1,4 +1,5 @@
 #include "scanner.hpp"
+#include "vendor_hid.hpp"
 
 #include <bluetoothleapis.h>
 #include <devpropdef.h>
@@ -530,6 +531,7 @@ std::array<DeviceState, 3> ScanAllDevices() {
     ScanPnpBluetooth(out, audio);
     ScanBleGatt(out, audio);
     ScanUsbHidPower(out, audio);
+    ScanVendorHidDevices(out);
     FinalizeDevices(out);
     return out;
 }

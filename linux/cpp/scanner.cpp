@@ -88,6 +88,122 @@ bool HasNonZeroHex(const std::string& s) {
     return false;
 }
 
+struct AirpodsReading {
+    std::string displayName;
+    int percent = -1;
+    bool charging = false;
+};
+
+const char* LookupAirpodsModel(uint16_t model) {
+    switch (model) {
+        case 0x0220: return "AirPods";
+        case 0x0F20: return "AirPods 2";
+        case 0x1320: return "AirPods 3";
+        case 0x1920: return "AirPods 4";
+        case 0x0E20: return "AirPods Pro";
+        case 0x1420: return "AirPods Pro 2";
+        case 0x2420: return "AirPods Pro 2";
+        case 0x0A20: return "AirPods Max";
+        default: return nullptr;
+    }
+}
+
+int NibbleToPercent(uint8_t nib) {
+    return (nib <= 10) ? static_cast<int>(nib) * 10 : -1;
+}
+
+bool ParseAppleContinuityAirPods(const std::vector<uint8_t>& data, AirpodsReading& out) {
+    if (data.size() < 9 || data[0] != 0x07 || data[1] < 0x19 || data[2] != 0x01) {
+        return false;
+    }
+    const uint16_t model = (static_cast<uint16_t>(data[3]) << 8) | data[4];
+    const char* modelName = LookupAirpodsModel(model);
+    if (!modelName) return false;
+
+    const bool flipped = (data[5] & 0x20u) != 0;
+    const uint8_t nibA = (data[6] >> 4) & 0x0Fu;
+    const uint8_t nibB = data[6] & 0x0Fu;
+    const uint8_t leftNib = flipped ? nibB : nibA;
+    const uint8_t rightNib = flipped ? nibA : nibB;
+    const uint8_t caseNib = data[7] & 0x0Fu;
+    const uint8_t chgFlags = (data[7] >> 4) & 0x0Fu;
+    const bool chgA = (chgFlags & 0x01u) != 0;
+    const bool chgB = (chgFlags & 0x02u) != 0;
+    const bool leftChg = flipped ? chgB : chgA;
+    const bool rightChg = flipped ? chgA : chgB;
+
+    const int leftPct = NibbleToPercent(leftNib);
+    const int rightPct = NibbleToPercent(rightNib);
+    const int casePct = NibbleToPercent(caseNib);
+
+    int minPct = -1;
+    bool charging = false;
+    if (leftPct >= 0 && rightPct >= 0) {
+        minPct = std::min(leftPct, rightPct);
+        charging = leftChg || rightChg;
+    } else if (leftPct >= 0) {
+        minPct = leftPct;
+        charging = leftChg;
+    } else if (rightPct >= 0) {
+        minPct = rightPct;
+        charging = rightChg;
+    } else {
+        return false;
+    }
+
+    std::string detail;
+    auto appendPart = [&](const char* prefix, int val) {
+        if (val < 0) return;
+        if (!detail.empty()) detail += ' ';
+        detail += prefix;
+        detail += std::to_string(val);
+        detail += '%';
+    };
+    if (model == 0x0A20) {
+        appendPart("", minPct);
+    } else {
+        appendPart("L:", leftPct);
+        appendPart("R:", rightPct);
+        appendPart("C:", casePct);
+    }
+
+    out.displayName = detail.empty() ? std::string(modelName) : (std::string(modelName) + " (" + detail + ")");
+    out.percent = minPct;
+    out.charging = charging;
+    return true;
+}
+
+void ReadAppleManufacturerData(DBusMessageIter* arrIter, std::vector<uint8_t>& out) {
+    DBusMessageIter dict;
+    dbus_message_iter_recurse(arrIter, &dict);
+    while (dbus_message_iter_get_arg_type(&dict) == DBUS_TYPE_DICT_ENTRY) {
+        DBusMessageIter entry;
+        dbus_message_iter_recurse(&dict, &entry);
+        if (dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_UINT16) {
+            uint16_t mfgId = 0;
+            dbus_message_iter_get_basic(&entry, &mfgId);
+            if (mfgId == 0x004Cu && dbus_message_iter_next(&entry) &&
+                dbus_message_iter_get_arg_type(&entry) == DBUS_TYPE_VARIANT) {
+                DBusMessageIter var;
+                dbus_message_iter_recurse(&entry, &var);
+                if (dbus_message_iter_get_arg_type(&var) == DBUS_TYPE_ARRAY) {
+                    DBusMessageIter bytes;
+                    dbus_message_iter_recurse(&var, &bytes);
+                    out.clear();
+                    while (dbus_message_iter_get_arg_type(&bytes) == DBUS_TYPE_BYTE && out.size() < 64) {
+                        uint8_t b = 0;
+                        dbus_message_iter_get_basic(&bytes, &b);
+                        out.push_back(b);
+                        dbus_message_iter_next(&bytes);
+                    }
+                    return;
+                }
+            }
+        }
+        dbus_message_iter_next(&dict);
+    }
+}
+
 void ScanUPower(DBusConnection* sys, std::array<DeviceState, 3>& out) {
     if (!sys) return;
     DbusMsg call(dbus_message_new_method_call(
@@ -191,7 +307,7 @@ void ScanUPower(DBusConnection* sys, std::array<DeviceState, 3>& out) {
     }
 }
 
-void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out) {
+void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out, bool allowAirpodsBle) {
     if (!sys || AllOnline(out)) return;
     DbusMsg call(dbus_message_new_method_call(
         "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects"));
@@ -204,6 +320,14 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out) {
     DBusMessageIter it;
     if (!dbus_message_iter_init(rep.p, &it) || dbus_message_iter_get_arg_type(&it) != DBUS_TYPE_ARRAY) return;
 
+    struct AirpodsCandidate {
+        AirpodsReading reading;
+        int16_t rssi = -127;
+        bool connected = false;
+    };
+    bool hasConnectedAppleAudioWithoutBat = false;
+    std::vector<AirpodsCandidate> airpodsCandidates;
+
     DBusMessageIter objs;
     dbus_message_iter_recurse(&it, &objs);
     while (dbus_message_iter_get_arg_type(&objs) == DBUS_TYPE_DICT_ENTRY) {
@@ -211,10 +335,12 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out) {
         dbus_message_iter_recurse(&objs, &oe);
         if (dbus_message_iter_next(&oe) && dbus_message_iter_get_arg_type(&oe) == DBUS_TYPE_ARRAY) {
             dbus_message_iter_recurse(&oe, &ifaces);
-            bool connected = false, hasBat = false;
+            bool connected = false, hasBat = false, hasRssi = false;
             uint8_t batPct = 0;
             uint32_t cod = 0;
+            int16_t rssi = -127;
             std::string name, icon;
+            std::vector<uint8_t> appleData;
 
             while (dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
                 DBusMessageIter ie, props;
@@ -256,6 +382,11 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out) {
                                 if (s) icon = s;
                             } else if (isDev && std::strcmp(pk, "Class") == 0 && pt == DBUS_TYPE_UINT32) {
                                 dbus_message_iter_get_basic(&pv, &cod);
+                            } else if (isDev && std::strcmp(pk, "RSSI") == 0 && pt == DBUS_TYPE_INT16) {
+                                dbus_message_iter_get_basic(&pv, &rssi);
+                                hasRssi = true;
+                            } else if (isDev && std::strcmp(pk, "ManufacturerData") == 0 && pt == DBUS_TYPE_ARRAY) {
+                                ReadAppleManufacturerData(&pv, appleData);
                             }
                         }
                         dbus_message_iter_next(&props);
@@ -265,9 +396,36 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out) {
             }
             if (connected && hasBat && batPct <= 100) {
                 StoreCandidate(out, ClassifyDevice(name, icon, cod), name, batPct, false);
+            } else if (connected && !hasBat) {
+                const std::string lowName = ToLower(name);
+                const bool isAppleAudioName =
+                    lowName.find("airpods") != std::string::npos ||
+                    lowName.find("beats") != std::string::npos ||
+                    lowName.find("apple") != std::string::npos;
+                if (ClassifyDevice(name, icon, cod) == DeviceKind::Headphones || isAppleAudioName) {
+                    hasConnectedAppleAudioWithoutBat = true;
+                }
+            }
+            if (!appleData.empty() && (connected || (hasRssi && rssi >= -65))) {
+                AirpodsReading reading{};
+                if (ParseAppleContinuityAirPods(appleData, reading)) {
+                    airpodsCandidates.push_back({std::move(reading), hasRssi ? rssi : static_cast<int16_t>(0), connected});
+                }
             }
         }
         dbus_message_iter_next(&objs);
+    }
+
+    if ((hasConnectedAppleAudioWithoutBat || allowAirpodsBle) && !airpodsCandidates.empty()) {
+        const AirpodsCandidate* best = &airpodsCandidates[0];
+        for (size_t i = 1; i < airpodsCandidates.size(); ++i) {
+            const auto& c = airpodsCandidates[i];
+            if ((c.connected && !best->connected) || (c.connected == best->connected && c.rssi > best->rssi)) {
+                best = &c;
+            }
+        }
+        StoreCandidate(out, DeviceKind::Headphones, best->reading.displayName,
+                       best->reading.percent, best->reading.charging);
     }
 }
 
@@ -321,10 +479,10 @@ void ScanSysfs(std::array<DeviceState, 3>& out) {
 
 } // namespace
 
-std::array<DeviceState, 3> ScanAllDevices(DBusConnection* sysBus) {
+std::array<DeviceState, 3> ScanAllDevices(DBusConnection* sysBus, bool allowAirpodsBle) {
     std::array<DeviceState, 3> out{};
     ScanUPower(sysBus, out);
-    ScanBlueZ(sysBus, out);
+    ScanBlueZ(sysBus, out, allowAirpodsBle);
     ScanSysfs(out);
     return out;
 }

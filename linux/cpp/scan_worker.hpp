@@ -23,8 +23,9 @@ public:
 
     int NotifyFd() const { return notifyFd_; }
 
-    void Start() {
+    void Start(bool allowAirpodsBle = false) {
         if (running_) return;
+        allowAirpodsBle_ = allowAirpodsBle;
         running_ = true;
         worker_ = std::thread([this] { Run(); });
     }
@@ -91,7 +92,7 @@ private:
                 if (bus) dbus_connection_set_exit_on_disconnect(bus, FALSE);
             }
 
-            auto snap = ScanAllDevices(bus);
+            auto snap = ScanAllDevices(bus, allowAirpodsBle_);
             {
                 std::lock_guard<std::mutex> lk(mu_);
                 if (stop_) break;
@@ -114,6 +115,7 @@ private:
 
     int notifyFd_ = -1;
     bool running_ = false;
+    bool allowAirpodsBle_ = false;
     std::mutex mu_;
     std::condition_variable cv_;
     bool stop_ = false;

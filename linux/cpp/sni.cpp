@@ -653,7 +653,12 @@ void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
         for (size_t i = 0; i < 3; ++i) {
             if (!states_[i].online) continue;
             for (const auto& d : states_[i].items) {
-                const std::string devName = d.name.empty() ? std::string(slots_[i].spec->label) : d.name;
+                std::string devName = d.name.empty() ? std::string(slots_[i].spec->label) : d.name;
+                const size_t paren = devName.rfind(" (");
+                if (paren != std::string::npos && devName.size() >= 2 &&
+                    devName.compare(devName.size() - 2, 2, "%)") == 0) {
+                    devName.resize(paren);
+                }
                 const AlertLevel lvl = alertTracker_.Evaluate(static_cast<int>(i), devName, d.percent, d.charging, nowSec);
                 if (lvl == AlertLevel::None) continue;
                 SendDesktopNotification(slots_[i].conn, devName, d.percent, lvl == AlertLevel::Critical5);

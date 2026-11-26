@@ -6,6 +6,7 @@ mod history;
 mod icon;
 mod scanner;
 mod tray;
+mod vendor_hid;
 mod win32;
 
 use device::DeviceState;

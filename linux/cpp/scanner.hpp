@@ -6,4 +6,4 @@
 
 #include <array>
 
-std::array<DeviceState, 3> ScanAllDevices(DBusConnection* sysBus);
+std::array<DeviceState, 3> ScanAllDevices(DBusConnection* sysBus, bool allowAirpodsBle = false);

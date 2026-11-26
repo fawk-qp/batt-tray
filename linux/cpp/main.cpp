@@ -96,10 +96,12 @@ int main(int argc, char** argv) {
     bool hideOffline = false;
     bool demoMode = false;
     bool notifyEnabled = true;
+    bool allowAirpodsBle = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--hide-offline") == 0) hideOffline = true;
         else if (std::strcmp(argv[i], "--demo") == 0) demoMode = true;
         else if (std::strcmp(argv[i], "--no-notify") == 0) notifyEnabled = false;
+        else if (std::strcmp(argv[i], "--airpods-ble") == 0) allowAirpodsBle = true;
     }
 
     FdGuard lockFd(AcquireInstanceLock());
@@ -139,7 +141,7 @@ int main(int argc, char** argv) {
 
     ScanWorker worker;
     if (!demoMode) {
-        worker.Start();
+        worker.Start(allowAirpodsBle);
     }
 
     int64_t nextPeriodicMs = NowMs() + kPollFallbackMs;

@@ -128,15 +128,18 @@ DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint, 
 
     if (ContainsAny(low, {
             "keyboard", "kbd", "keychron", "nuphy", "akko", "wooting", "anne pro", "rk61", "rk84",
-            "mx keys", "k380", "k780", "g915", "g715", "apex pro", "blackwidow", "huntsman",
+            "mx keys", "k380", "k780", "k850", "ergo k860", "wave keys", "pop keys", "craft",
+            "g915", "g715", "apex pro", "blackwidow", "huntsman",
             "magic keyboard", "клавиатур"})) {
         return DeviceKind::Keyboard;
     }
 
     if (ContainsAny(low, {
-            "mouse", "mx master", "mx anywhere", "g pro", "superlight", "g305", "g304", "g502",
+            "mouse", "mx master", "mx anywhere", "g pro", "pro wireless", "superlight",
+            "g305", "g304", "g502", "g603", "g604", "g703", "g903",
             "viper", "deathadder", "basilisk", "orochi", "aerox", "lamzu", "pulsar",
-            "attack shark", "vgn", "m720", "m650", "pebble", "trackball", "мышь"})) {
+            "attack shark", "vgn", "m720", "m705", "m650", "lift", "ergo m575",
+            "pebble", "trackball", "мышь"})) {
         return DeviceKind::Mouse;
     }
 

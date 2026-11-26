@@ -42,6 +42,7 @@ jobs:
         shell: pwsh
         run: |
           $env:RUSTFLAGS = "-C control-flow-guard=yes"
+          cargo test --manifest-path windows\rust\Cargo.toml
           cargo build --manifest-path windows\rust\Cargo.toml --release
           Copy-Item windows\rust\target\release\batt-tray-win.exe dist\batt-tray-win-rust.exe
 
@@ -78,6 +79,7 @@ jobs:
 
       - name: Build Linux Rust
         run: |
+          cargo test --manifest-path linux/rust/Cargo.toml
           RUSTFLAGS="-C relocation-model=pie -C link-arg=-Wl,-z,relro,-z,now" \
           cargo build --manifest-path linux/rust/Cargo.toml --release
           cp linux/rust/target/release/batt-tray-linux dist/batt-tray-linux-rust

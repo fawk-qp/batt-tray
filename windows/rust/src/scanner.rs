@@ -1,4 +1,5 @@
 use crate::device::{classify_device, finalize_devices, names_match_audio, store_candidate, DeviceEntry, DeviceKind, DeviceState};
+use crate::vendor_hid::scan_vendor_hid_devices;
 use crate::win32::*;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -564,6 +565,7 @@ pub fn scan_all_devices() -> [DeviceState; 3] {
         let audio = query_active_audio_endpoint();
         scan_pnp_bluetooth(&mut out, &audio);
         scan_ble_gatt(&mut out, &audio);
+        scan_vendor_hid_devices(&mut out);
     }
     finalize_devices(&mut out);
     out

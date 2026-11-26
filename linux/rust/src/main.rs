@@ -101,6 +101,7 @@ fn main() {
     let mut hide_offline = false;
     let mut demo_mode = false;
     let mut notify_enabled = true;
+    let mut allow_airpods_ble = false;
     for arg in std::env::args().skip(1) {
         if arg == "--hide-offline" {
             hide_offline = true;
@@ -108,6 +109,8 @@ fn main() {
             demo_mode = true;
         } else if arg == "--no-notify" {
             notify_enabled = false;
+        } else if arg == "--airpods-ble" {
+            allow_airpods_ble = true;
         }
     }
 
@@ -144,7 +147,7 @@ fn main() {
         };
 
         let worker = if !demo_mode {
-            Some(scan_worker::ScanWorker::start())
+            Some(scan_worker::ScanWorker::start(allow_airpods_ble))
         } else {
             None
         };
