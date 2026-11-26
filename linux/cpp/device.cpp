@@ -84,7 +84,11 @@ std::string SanitizeDeviceText(const std::string& s, size_t maxChars) {
             ++i;
             continue;
         }
-        // Drop bidi controls and zero-width characters (U+200B..200F, U+202A..202E, U+2066..2069, U+FEFF).
+        // Drop bidi controls and zero-width characters (U+061C, U+200B..200F, U+202A..202E, U+2066..2069, U+FEFF).
+        if (len == 2 && b == 0xD8u && b1 == 0x9Cu) {
+            i += len;
+            continue;
+        }
         if (len == 3) {
             const unsigned cp = ((b & 0x0Fu) << 12) |
                                 ((static_cast<unsigned char>(s[i + 1]) & 0x3Fu) << 6) |

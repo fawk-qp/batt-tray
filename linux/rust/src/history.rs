@@ -1,9 +1,15 @@
-use crate::dbus_ffi::{O_CLOEXEC, O_NOFOLLOW, O_NONBLOCK};
+use crate::dbus_ffi::{
+    cstr, getpid, getuid, openat, renameat, unlinkat, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
+    O_NOFOLLOW, O_NONBLOCK, O_WRONLY,
+};
 use crate::device::{sanitize_device_text, DeviceEntry, DeviceKind, DeviceState};
+use std::ffi::c_char;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_FILE_BYTES: u64 = 16_384;
@@ -153,16 +159,23 @@ impl DeviceHistory {
         if self.demo_mode {
             return;
         }
-        let (Some(dir), Some(path)) = (Self::storage_dir(), Self::storage_path()) else {
+        let Some(dir) = Self::storage_dir() else {
             return;
         };
         let _ = DirBuilder::new().recursive(true).mode(0o700).create(&dir);
-        let Ok(dir_meta) = fs::symlink_metadata(&dir) else {
+        let Ok(dir_file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            .open(&dir)
+        else {
             return;
         };
-        use std::os::unix::fs::MetadataExt;
+        let Ok(dir_meta) = dir_file.metadata() else {
+            return;
+        };
+        let uid = unsafe { getuid() };
         if !dir_meta.file_type().is_dir()
-            || dir_meta.uid() != unsafe { crate::dbus_ffi::getuid() }
+            || dir_meta.uid() != uid
             || (dir_meta.mode() & 0o077) != 0
         {
             return;
@@ -187,30 +200,70 @@ impl DeviceHistory {
             payload.push('\n');
         }
 
-        let tmp_path = dir.join("history.tsv.tmp");
-        let Ok(mut f) = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .custom_flags(O_NOFOLLOW | O_CLOEXEC)
-            .open(&tmp_path)
-        else {
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let pid = unsafe { getpid() };
+        let dir_fd = dir_file.as_raw_fd();
+        let mut tmp_cstr = None;
+        let mut out_fd = -1;
+
+        for _ in 0..16 {
+            let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let tmp_name = format!("history.tmp.{}.{}", pid, seq);
+            let c_name = cstr(&tmp_name);
+            let fd = unsafe {
+                openat(
+                    dir_fd,
+                    c_name.as_ptr(),
+                    O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
+                    0o600u32,
+                )
+            };
+            if fd >= 0 {
+                out_fd = fd;
+                tmp_cstr = Some(c_name);
+                break;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
+                return;
+            }
+        }
+
+        let (Some(tmp_cstr), true) = (tmp_cstr, out_fd >= 0) else {
             return;
         };
-        if !f.metadata().map(|m| m.file_type().is_file()).unwrap_or(false) {
+
+        let mut f = unsafe { fs::File::from_raw_fd(out_fd) };
+        let ok_meta = f
+            .metadata()
+            .map(|m| m.file_type().is_file() && m.uid() == uid && m.nlink() == 1)
+            .unwrap_or(false);
+        if !ok_meta {
             drop(f);
-            let _ = fs::remove_file(&tmp_path);
+            unsafe {
+                unlinkat(dir_fd, tmp_cstr.as_ptr(), 0);
+            }
             return;
         }
         if f.write_all(payload.as_bytes()).is_err() {
             drop(f);
-            let _ = fs::remove_file(&tmp_path);
+            unsafe {
+                unlinkat(dir_fd, tmp_cstr.as_ptr(), 0);
+            }
             return;
         }
         drop(f);
-        if fs::rename(&tmp_path, &path).is_err() {
-            let _ = fs::remove_file(&tmp_path);
+        if unsafe {
+            renameat(
+                dir_fd,
+                tmp_cstr.as_ptr(),
+                dir_fd,
+                b"history.tsv\0".as_ptr() as *const c_char,
+            )
+        } != 0
+        {
+            unsafe {
+                unlinkat(dir_fd, tmp_cstr.as_ptr(), 0);
+            }
         }
     }
 

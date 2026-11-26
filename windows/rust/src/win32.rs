@@ -26,6 +26,7 @@ pub type WNDPROC = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESU
 pub type FONTENUMPROCW = unsafe extern "system" fn(*const LOGFONTW, *const c_void, u32, LPARAM) -> i32;
 
 pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+pub const ERROR_FILE_EXISTS: u32 = 80;
 pub const ERROR_ALREADY_EXISTS: u32 = 183;
 pub const ERROR_SUCCESS: i32 = 0;
 
@@ -88,12 +89,15 @@ pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
 
 pub const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
 pub const GENERIC_READ: u32 = 0x8000_0000;
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
 pub const FILE_SHARE_READ: u32 = 0x0000_0001;
 pub const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+pub const CREATE_NEW: u32 = 1;
 pub const OPEN_EXISTING: u32 = 3;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+pub const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
 pub const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
 pub const IDLE_PRIORITY_CLASS: u32 = 0x0000_0040;
@@ -362,6 +366,28 @@ pub struct IMMDeviceEnumeratorVtbl {
 }
 
 #[repr(C)]
+#[derive(Default)]
+pub struct FILETIME {
+    pub dwLowDateTime: u32,
+    pub dwHighDateTime: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct BY_HANDLE_FILE_INFORMATION {
+    pub dwFileAttributes: u32,
+    pub ftCreationTime: FILETIME,
+    pub ftLastAccessTime: FILETIME,
+    pub ftLastWriteTime: FILETIME,
+    pub dwVolumeSerialNumber: u32,
+    pub nFileSizeHigh: u32,
+    pub nFileSizeLow: u32,
+    pub nNumberOfLinks: u32,
+    pub nFileIndexHigh: u32,
+    pub nFileIndexLow: u32,
+}
+
+#[repr(C)]
 pub struct MitigationFlagsPolicy {
     pub flags: u32,
 }
@@ -423,9 +449,28 @@ extern "system" {
     ) -> BOOL;
     pub fn GetModuleHandleW(lpModuleName: *const u16) -> HMODULE;
     pub fn GetModuleFileNameW(hModule: HMODULE, lpFilename: *mut u16, nSize: u32) -> u32;
+    pub fn GetCurrentProcessId() -> u32;
+    pub fn GetTickCount64() -> u64;
     pub fn CreateMutexW(lpAttr: *mut c_void, bInitialOwner: BOOL, lpName: *const u16) -> HANDLE;
     pub fn GetLastError() -> u32;
     pub fn CloseHandle(hObject: HANDLE) -> BOOL;
+    pub fn WriteFile(
+        hFile: HANDLE,
+        lpBuffer: *const c_void,
+        nNumberOfBytesToWrite: u32,
+        lpNumberOfBytesWritten: *mut u32,
+        lpOverlapped: *mut c_void,
+    ) -> BOOL;
+    pub fn GetFileInformationByHandle(
+        hFile: HANDLE,
+        lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+    ) -> BOOL;
+    pub fn DeleteFileW(lpFileName: *const u16) -> BOOL;
+    pub fn MoveFileExW(
+        lpExistingFileName: *const u16,
+        lpNewFileName: *const u16,
+        dwFlags: u32,
+    ) -> BOOL;
     pub fn DuplicateHandle(
         hSourceProcessHandle: HANDLE,
         hSourceHandle: HANDLE,

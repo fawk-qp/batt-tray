@@ -70,10 +70,7 @@ void TrimIdleWorkingSet() {
 class AudioChangeClient final : public IMMNotificationClient {
 public:
     explicit AudioChangeClient(HANDLE scanEvent) : scanEvent_(scanEvent) {}
-    ~AudioChangeClient() {
-        HANDLE h = scanEvent_.exchange(nullptr, std::memory_order_acq_rel);
-        if (h) CloseHandle(h);
-    }
+    ~AudioChangeClient() { Detach(); }
 
     ULONG STDMETHODCALLTYPE AddRef() override {
         return ++ref_;
@@ -112,18 +109,23 @@ public:
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
 
     void Detach() {
-        HANDLE h = scanEvent_.exchange(nullptr, std::memory_order_acq_rel);
-        if (h) CloseHandle(h);
+        AcquireSRWLockExclusive(&lock_);
+        HANDLE toClose = scanEvent_;
+        scanEvent_ = nullptr;
+        ReleaseSRWLockExclusive(&lock_);
+        if (toClose) CloseHandle(toClose);
     }
 
 private:
     void Trigger() {
-        HANDLE ev = scanEvent_.load(std::memory_order_acquire);
-        if (ev) SetEvent(ev);
+        AcquireSRWLockShared(&lock_);
+        if (scanEvent_) SetEvent(scanEvent_);
+        ReleaseSRWLockShared(&lock_);
     }
 
     std::atomic<ULONG> ref_{1};
-    std::atomic<HANDLE> scanEvent_{nullptr};
+    SRWLOCK lock_ = SRWLOCK_INIT;
+    HANDLE scanEvent_ = nullptr;
 };
 
 struct AppContext {
@@ -190,6 +192,7 @@ void WorkerLoop(HWND hwnd, AppContext* app) {
                         &audioEvent, 0, FALSE, DUPLICATE_SAME_ACCESS);
         audioClient = new AudioChangeClient(audioEvent);
         if (FAILED(audioEnum->RegisterEndpointNotificationCallback(audioClient))) {
+            audioClient->Detach();
             audioClient->Release();
             audioClient = nullptr;
         }
@@ -210,9 +213,10 @@ void WorkerLoop(HWND hwnd, AppContext* app) {
 
     if (audioEnum) {
         if (audioClient) {
-            audioClient->Detach();
             audioEnum->UnregisterEndpointNotificationCallback(audioClient);
+            audioClient->Detach();
             audioClient->Release();
+            audioClient = nullptr;
         }
         audioEnum->Release();
     }

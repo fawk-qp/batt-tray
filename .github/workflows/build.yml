@@ -41,7 +41,7 @@ jobs:
       - name: Build Windows Rust
         shell: pwsh
         run: |
-          $env:RUSTFLAGS = "-C link-arg=$((Resolve-Path 'windows\app.res').Path) -C control-flow-guard=yes"
+          $env:RUSTFLAGS = "-C control-flow-guard=yes"
           cargo build --manifest-path windows\rust\Cargo.toml --release
           Copy-Item windows\rust\target\release\batt-tray-win.exe dist\batt-tray-win-rust.exe
 

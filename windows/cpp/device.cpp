@@ -57,7 +57,7 @@ std::wstring SanitizeDeviceText(const std::wstring& s, size_t maxChars) {
     clean.reserve(std::min(s.size(), maxChars));
     for (wchar_t ch : s) {
         if (ch < 0x20 || ch == 0x7F) continue;
-        if ((ch >= 0x200B && ch <= 0x200F) || (ch >= 0x202A && ch <= 0x202E) ||
+        if (ch == 0x061C || (ch >= 0x200B && ch <= 0x200F) || (ch >= 0x202A && ch <= 0x202E) ||
             (ch >= 0x2066 && ch <= 0x2069) || ch == 0xFEFF) continue;
         clean.push_back(ch);
         if (clean.size() >= maxChars) break;

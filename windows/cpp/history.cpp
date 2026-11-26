@@ -145,12 +145,28 @@ void DeviceHistory::Save() const {
         payload += '\n';
     }
 
-    const std::wstring tmpPath = path + L".tmp";
-    if (IsReparsePoint(tmpPath)) return;
-
-    HANDLE h = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    const DWORD pid = GetCurrentProcessId();
+    const ULONGLONG tick = GetTickCount64();
+    std::wstring tmpPath;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        tmpPath = dir + L"\\history.tmp." + std::to_wstring(pid) + L"." +
+                  std::to_wstring(tick) + L"." + std::to_wstring(attempt);
+        h = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (h != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS) return;
+    }
     if (h == INVALID_HANDLE_VALUE) return;
+
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(h, &info) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        info.nNumberOfLinks != 1) {
+        CloseHandle(h);
+        DeleteFileW(tmpPath.c_str());
+        return;
+    }
 
     DWORD written = 0;
     const BOOL ok = payload.empty() || WriteFile(h, payload.data(), static_cast<DWORD>(payload.size()), &written, nullptr);
@@ -159,7 +175,9 @@ void DeviceHistory::Save() const {
         DeleteFileW(tmpPath.c_str());
         return;
     }
-    MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+    if (!MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmpPath.c_str());
+    }
 }
 
 void DeviceHistory::SyncActive(const std::array<DeviceState, 3>& active) {

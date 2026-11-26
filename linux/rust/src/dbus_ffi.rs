@@ -36,12 +36,24 @@ pub const PR_SET_DUMPABLE: c_int = 4;
 pub const PR_SET_NO_NEW_PRIVS: c_int = 38;
 
 #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+pub const O_DIRECTORY: c_int = 0o040000;
+#[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+pub const O_DIRECTORY: c_int = 0o200000;
+
+#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
 pub const O_NOFOLLOW: c_int = 0o100000;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
 pub const O_NOFOLLOW: c_int = 0o400000;
 
+pub const O_WRONLY: c_int = 1;
+pub const O_CREAT: c_int = 0o100;
+pub const O_EXCL: c_int = 0o200;
 pub const O_NONBLOCK: c_int = 0o0004000;
 pub const O_CLOEXEC: c_int = 0o2000000;
+
+pub const F_SETFD: c_int = 2;
+pub const FD_CLOEXEC: c_int = 1;
+pub const F_SETFL: c_int = 4;
 
 #[repr(C)]
 pub struct DBusConnection {
@@ -58,6 +70,12 @@ pub struct DBusError {
     pub name: *const c_char,
     pub message: *const c_char,
     _pad: [usize; 6],
+}
+
+impl Default for DBusError {
+    fn default() -> Self {
+        Self { name: null(), message: null(), _pad: [0; 6] }
+    }
 }
 
 #[repr(C)]
@@ -95,6 +113,12 @@ extern "C" {
     pub fn flock(fd: c_int, op: c_int) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+    pub fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+    pub fn eventfd(initval: u32, flags: c_int) -> c_int;
+    pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    pub fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+    pub fn renameat(olddirfd: c_int, oldpath: *const c_char, newdirfd: c_int, newpath: *const c_char) -> c_int;
+    pub fn unlinkat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
     pub fn sigemptyset(set: *mut SigSet) -> c_int;
     pub fn sigaddset(set: *mut SigSet, sig: c_int) -> c_int;
     pub fn sigprocmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
@@ -105,12 +129,14 @@ extern "C" {
 
 #[link(name = "dbus-1")]
 extern "C" {
+    pub fn dbus_threads_init_default() -> u32;
     pub fn dbus_error_init(err: *mut DBusError);
     pub fn dbus_error_free(err: *mut DBusError);
     pub fn dbus_bus_get_private(bus_type: c_int, err: *mut DBusError) -> *mut DBusConnection;
     pub fn dbus_bus_request_name(c: *mut DBusConnection, name: *const c_char, flags: u32, err: *mut DBusError) -> c_int;
     pub fn dbus_bus_add_match(c: *mut DBusConnection, rule: *const c_char, err: *mut DBusError);
     pub fn dbus_connection_set_exit_on_disconnect(c: *mut DBusConnection, exit: u32);
+    pub fn dbus_connection_get_is_connected(c: *mut DBusConnection) -> u32;
     pub fn dbus_connection_close(c: *mut DBusConnection);
     pub fn dbus_connection_unref(c: *mut DBusConnection);
     pub fn dbus_connection_flush(c: *mut DBusConnection);

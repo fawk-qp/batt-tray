@@ -1,3 +1,4 @@
+#include "scan_worker.hpp"
 #include "scanner.hpp"
 #include "sni.hpp"
 
@@ -5,6 +6,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/file.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -86,6 +88,11 @@ DBusHandlerResult SystemSignalFilter(DBusConnection*, DBusMessage* msg, void* da
 } // namespace
 
 int main(int argc, char** argv) {
+    umask(0077);
+    prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+    dbus_threads_init_default();
+
     bool hideOffline = false;
     bool demoMode = false;
     for (int i = 1; i < argc; ++i) {
@@ -128,21 +135,37 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    ScanWorker worker;
+    if (!demoMode) {
+        worker.Start();
+    }
+
     int64_t nextPeriodicMs = NowMs() + kPollFallbackMs;
     while (ctrl.running) {
         const int64_t now = NowMs();
         if ((ctrl.scanDueMs >= 0 && now >= ctrl.scanDueMs) || now >= nextPeriodicMs) {
             ctrl.scanDueMs = -1;
             nextPeriodicMs = now + kPollFallbackMs;
-            sni.UpdateAll(demoMode ? BuildDemoStates() : ScanAllDevices(sysBus));
+            if (demoMode) {
+                sni.UpdateAll(BuildDemoStates());
+            } else {
+                worker.RequestScan();
+            }
         }
 
-        pollfd fds[5]{};
+        pollfd fds[6]{};
         int nfds = 0;
         int sigIdx = -1;
+        int workerIdx = -1;
         if (sigFd.fd >= 0) {
             sigIdx = nfds;
             fds[nfds].fd = sigFd.fd;
+            fds[nfds].events = POLLIN;
+            ++nfds;
+        }
+        if (!demoMode && worker.NotifyFd() >= 0) {
+            workerIdx = nfds;
+            fds[nfds].fd = worker.NotifyFd();
             fds[nfds].events = POLLIN;
             ++nfds;
         }
@@ -169,11 +192,18 @@ int main(int argc, char** argv) {
                 ctrl.running = false;
                 break;
             }
+            if (workerIdx >= 0 && (fds[workerIdx].revents & POLLIN)) {
+                std::array<DeviceState, 3> snap{};
+                if (worker.TakeSnapshot(snap)) {
+                    sni.UpdateAll(snap);
+                }
+            }
             sni.DrainAll();
             DrainDbusConn(sysBus);
         }
     }
 
+    worker.Stop();
     sni.Shutdown();
     if (sysBus) {
         dbus_connection_close(sysBus);

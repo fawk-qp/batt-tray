@@ -1,6 +1,7 @@
 mod dbus_ffi;
 mod device;
 mod history;
+mod scan_worker;
 mod scanner;
 mod sni;
 
@@ -93,6 +94,9 @@ unsafe extern "C" fn sys_filter(_: *mut DBusConnection, msg: *mut DBusMessage, _
 
 fn main() {
     apply_process_hardening();
+    unsafe {
+        dbus_threads_init_default();
+    }
     let mut hide_offline = false;
     let mut demo_mode = false;
     for arg in std::env::args().skip(1) {
@@ -135,6 +139,12 @@ fn main() {
             return;
         };
 
+        let worker = if !demo_mode {
+            Some(scan_worker::ScanWorker::start())
+        } else {
+            None
+        };
+
         let mut next_periodic = Instant::now();
         sni::schedule_scan(Duration::ZERO);
 
@@ -143,23 +153,32 @@ fn main() {
             if sni::is_scan_due(now) || now >= next_periodic {
                 sni::clear_scan_due();
                 next_periodic = now + POLL_FALLBACK;
-                let found = if demo_mode {
-                    build_demo_states()
-                } else {
-                    scanner::scan_all_devices(sys_bus)
-                };
-                sni::update_all_slots(&found);
+                if demo_mode {
+                    let found = build_demo_states();
+                    sni::update_all_slots(&found);
+                } else if let Some(ref w) = worker {
+                    w.request_scan();
+                }
             }
 
             let conns = [slot_conns[0], slot_conns[1], slot_conns[2], sys_bus];
-            let mut fds = [PollFd { fd: -1, events: POLLIN, revents: 0 }; 5];
+            let mut fds = [PollFd { fd: -1, events: POLLIN, revents: 0 }; 6];
             let mut nfds = 0usize;
             let mut sig_idx = None;
+            let mut worker_idx = None;
 
             if sig_fd.0 >= 0 {
                 sig_idx = Some(nfds);
                 fds[nfds] = PollFd { fd: sig_fd.0, events: POLLIN, revents: 0 };
                 nfds += 1;
+            }
+            if let Some(ref w) = worker {
+                let wfd = w.notify_fd();
+                if wfd >= 0 {
+                    worker_idx = Some(nfds);
+                    fds[nfds] = PollFd { fd: wfd, events: POLLIN, revents: 0 };
+                    nfds += 1;
+                }
             }
             for &c in &conns {
                 let mut fd = -1;
@@ -182,12 +201,20 @@ fn main() {
                         break;
                     }
                 }
+                if let (Some(wi), Some(ref w)) = (worker_idx, &worker) {
+                    if (fds[wi].revents & POLLIN) != 0 {
+                        if let Some(snap) = w.take_snapshot() {
+                            sni::update_all_slots(&snap);
+                        }
+                    }
+                }
                 for &c in &conns {
                     drain_conn(c);
                 }
             }
         }
 
+        drop(worker);
         sni::shutdown_slots();
         if !sys_bus.is_null() {
             dbus_connection_close(sys_bus);

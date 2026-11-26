@@ -7,6 +7,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -32,11 +35,10 @@ int64_t NowUnixSec() {
 
 bool ParseIntStrict(const std::string& s, int& out) {
     if (s.empty()) return false;
-    char* end = nullptr;
-    errno = 0;
-    const long v = std::strtol(s.c_str(), &end, 10);
-    if (errno != 0 || end == s.c_str() || *end != '\0') return false;
-    out = static_cast<int>(v);
+    int val = 0;
+    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
+    if (ec != std::errc{} || ptr != s.data() + s.size()) return false;
+    out = val;
     return true;
 }
 
@@ -176,13 +178,15 @@ void DeviceHistory::Load(bool demoMode) {
 void DeviceHistory::Save() const {
     if (demoMode_) return;
     const std::string dir = GetStorageDir();
-    const std::string path = GetStoragePath();
-    if (dir.empty() || path.empty()) return;
+    if (dir.empty()) return;
 
     EnsureDirRecursive(dir);
 
+    FdGuard dirFd(open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (dirFd.fd < 0) return;
+
     struct stat dirSt{};
-    if (lstat(dir.c_str(), &dirSt) != 0 || !S_ISDIR(dirSt.st_mode) ||
+    if (fstat(dirFd.fd, &dirSt) != 0 || !S_ISDIR(dirSt.st_mode) ||
         dirSt.st_uid != static_cast<uid_t>(getuid()) || (dirSt.st_mode & 077) != 0) {
         return;
     }
@@ -205,25 +209,37 @@ void DeviceHistory::Save() const {
         payload += '\n';
     }
 
-    const std::string tmpPath = path + ".tmp";
-    FdGuard f(open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600));
-    if (f.fd < 0) return;
+    static std::atomic<uint64_t> tmpCounter{0};
+    const unsigned long pid = static_cast<unsigned long>(getpid());
+    std::string tmpName;
+    int outFd = -1;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        const uint64_t seq = tmpCounter.fetch_add(1, std::memory_order_relaxed);
+        tmpName = "history.tmp." + std::to_string(pid) + "." + std::to_string(seq);
+        outFd = openat(dirFd.fd, tmpName.c_str(),
+                       O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (outFd >= 0) break;
+        if (errno != EEXIST) return;
+    }
+    if (outFd < 0) return;
 
+    FdGuard f(outFd);
     struct stat tmpSt{};
-    if (fstat(f.fd, &tmpSt) != 0 || !S_ISREG(tmpSt.st_mode)) {
-        unlink(tmpPath.c_str());
+    if (fstat(f.fd, &tmpSt) != 0 || !S_ISREG(tmpSt.st_mode) ||
+        tmpSt.st_uid != static_cast<uid_t>(getuid()) || tmpSt.st_nlink != 1) {
+        unlinkat(dirFd.fd, tmpName.c_str(), 0);
         return;
     }
 
     if (!payload.empty() && !WriteAll(f.fd, payload.data(), payload.size())) {
-        unlink(tmpPath.c_str());
+        unlinkat(dirFd.fd, tmpName.c_str(), 0);
         return;
     }
 
     close(f.fd);
     f.fd = -1;
-    if (std::rename(tmpPath.c_str(), path.c_str()) != 0) {
-        unlink(tmpPath.c_str());
+    if (renameat(dirFd.fd, tmpName.c_str(), dirFd.fd, "history.tsv") != 0) {
+        unlinkat(dirFd.fd, tmpName.c_str(), 0);
     }
 }
 

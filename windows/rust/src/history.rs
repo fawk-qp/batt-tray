@@ -1,7 +1,14 @@
 use crate::device::{clean_device_name, sanitize_device_text, DeviceEntry, DeviceKind, DeviceState};
-use crate::win32::{FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT};
+use crate::win32::{
+    CloseHandle, CreateFileW, DeleteFileW, GetCurrentProcessId, GetFileInformationByHandle,
+    GetLastError, GetTickCount64, MoveFileExW, WriteFile, BY_HANDLE_FILE_INFORMATION, CREATE_NEW,
+    ERROR_FILE_EXISTS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_OPEN_REPARSE_POINT, GENERIC_WRITE, INVALID_HANDLE_VALUE, MOVEFILE_REPLACE_EXISTING,
+};
+use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -165,27 +172,93 @@ impl DeviceHistory {
             payload.push('\n');
         }
 
-        let tmp_path = dir.join("history.tsv.tmp");
-        if is_reparse_point(&tmp_path) {
+        let pid = unsafe { GetCurrentProcessId() };
+        let tick = unsafe { GetTickCount64() };
+        let mut tmp_w = Vec::new();
+        let mut h = INVALID_HANDLE_VALUE;
+        for attempt in 0..16 {
+            let tmp_path = dir.join(format!("history.tmp.{}.{}.{}", pid, tick, attempt));
+            let w: Vec<u16> = tmp_path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let handle = unsafe {
+                CreateFileW(
+                    w.as_ptr(),
+                    GENERIC_WRITE,
+                    0,
+                    std::ptr::null_mut(),
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                h = handle;
+                tmp_w = w;
+                break;
+            }
+            if unsafe { GetLastError() } != ERROR_FILE_EXISTS {
+                return;
+            }
+        }
+        if h == INVALID_HANDLE_VALUE {
             return;
         }
-        let Ok(mut f) = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(&tmp_path)
-        else {
-            return;
-        };
-        use std::io::Write;
-        if f.write_all(payload.as_bytes()).is_err() {
-            drop(f);
-            let _ = fs::remove_file(&tmp_path);
+
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        let ok_info = unsafe { GetFileInformationByHandle(h, &mut info) } != 0
+            && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+            && info.nNumberOfLinks == 1;
+        if !ok_info {
+            unsafe {
+                CloseHandle(h);
+                DeleteFileW(tmp_w.as_ptr());
+            }
             return;
         }
-        drop(f);
-        let _ = fs::rename(&tmp_path, &path);
+
+        let bytes = payload.as_bytes();
+        let mut offset = 0usize;
+        let mut write_ok = true;
+        while offset < bytes.len() {
+            let chunk = (bytes.len() - offset).min(u32::MAX as usize) as u32;
+            let mut written = 0u32;
+            let ok = unsafe {
+                WriteFile(
+                    h,
+                    bytes[offset..].as_ptr() as *const c_void,
+                    chunk,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || written == 0 {
+                write_ok = false;
+                break;
+            }
+            offset += written as usize;
+        }
+        unsafe {
+            CloseHandle(h);
+        }
+        if !write_ok {
+            unsafe {
+                DeleteFileW(tmp_w.as_ptr());
+            }
+            return;
+        }
+        let path_w: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        if unsafe { MoveFileExW(tmp_w.as_ptr(), path_w.as_ptr(), MOVEFILE_REPLACE_EXISTING) } == 0 {
+            unsafe {
+                DeleteFileW(tmp_w.as_ptr());
+            }
+        }
     }
 
     pub fn sync_active(&mut self, active: &[DeviceState; 3]) {
