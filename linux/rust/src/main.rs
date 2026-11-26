@@ -1,3 +1,4 @@
+mod alert_tracker;
 mod dbus_ffi;
 mod device;
 mod history;
@@ -99,11 +100,14 @@ fn main() {
     }
     let mut hide_offline = false;
     let mut demo_mode = false;
+    let mut notify_enabled = true;
     for arg in std::env::args().skip(1) {
         if arg == "--hide-offline" {
             hide_offline = true;
         } else if arg == "--demo" {
             demo_mode = true;
+        } else if arg == "--no-notify" {
+            notify_enabled = false;
         }
     }
 
@@ -131,7 +135,7 @@ fn main() {
             }
         }
 
-        let Some(slot_conns) = sni::init_slots(hide_offline, demo_mode) else {
+        let Some(slot_conns) = sni::init_slots(hide_offline, demo_mode, notify_enabled) else {
             if !sys_bus.is_null() {
                 dbus_connection_close(sys_bus);
                 dbus_connection_unref(sys_bus);

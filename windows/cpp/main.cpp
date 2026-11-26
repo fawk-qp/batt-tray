@@ -145,6 +145,12 @@ void HandleTrayMenuCommand(HWND hwnd, UINT cmd) {
         case IDM_REFRESH:
             if (g_app->scanEvent) SetEvent(g_app->scanEvent);
             return;
+        case IDM_HIDE_OFFLINE:
+            g_app->tray.ToggleHideOffline();
+            return;
+        case IDM_LOW_BATTERY_ALERT:
+            g_app->tray.ToggleLowBatteryAlert();
+            return;
         case IDM_AUTOSTART:
             TrayManager::ToggleAutostart();
             return;
@@ -247,6 +253,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_app->tray.Update(snapshot)) {
                 TrimIdleWorkingSet();
             }
+            g_app->tray.EvaluateLowBatteryAlerts(snapshot);
             return 0;
         }
 

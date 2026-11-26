@@ -11,6 +11,28 @@ namespace {
 
 constexpr const wchar_t* kRunSubkey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr const wchar_t* kRunValue = L"BattTray";
+constexpr const wchar_t* kSettingsSubkey = L"Software\\BattTray";
+constexpr const wchar_t* kHideOfflineValue = L"HideOffline";
+constexpr const wchar_t* kLowBatteryAlertValue = L"LowBatteryAlert";
+constexpr const wchar_t* kAnchorTooltip = L"BattTray \u2014 нет подключённых устройств";
+
+DWORD LoadDwordSetting(const wchar_t* valueName, DWORD defaultVal) {
+    DWORD val = 0;
+    DWORD cb = sizeof(val);
+    const LONG rc = RegGetValueW(HKEY_CURRENT_USER, kSettingsSubkey, valueName,
+                                 RRF_RT_REG_DWORD, nullptr, &val, &cb);
+    return (rc == ERROR_SUCCESS) ? val : defaultVal;
+}
+
+void SaveDwordSetting(const wchar_t* valueName, DWORD val) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsSubkey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+    RegSetValueExW(key, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&val), sizeof(val));
+    RegCloseKey(key);
+}
 
 std::wstring TruncateName(const std::wstring& s, size_t maxLen) {
     if (s.size() <= maxLen) return s;
@@ -81,11 +103,10 @@ std::wstring GetCurrentExePath() {
 bool TrayManager::Init(HWND hwnd) {
     hwnd_ = hwnd;
     lightTheme_ = IsTaskbarLightTheme();
+    hideOffline_ = (LoadDwordSetting(kHideOfflineValue, 0) != 0);
+    lowBatteryAlert_ = (LoadDwordSetting(kLowBatteryAlertValue, 1) != 0);
     history_.Load();
-    const int iconSize = GetTaskbarIconSize();
-    for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, true, iconSize);
-    }
+    SyncVisibility(GetTaskbarIconSize());
     ShutdownIconRenderer();
     return true;
 }
@@ -94,23 +115,110 @@ void TrayManager::ReaddIcons() {
     if (!hwnd_) return;
     lightTheme_ = IsTaskbarLightTheme();
     const int iconSize = GetTaskbarIconSize();
+    bool online[3] = {states_[0].online, states_[1].online, states_[2].online};
+    const SlotVisibility vis = ComputeSlotVisibility(online, hideOffline_, anchorSlot_);
+    anchorSlot_ = vis.anchorSlot;
+    const auto& specs = GetSlotSpecs();
+    bool anyRendered = false;
     for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, true, iconSize);
+        if (!addedInTray_[i]) continue;
+        const std::wstring tip = (vis.anchorMode && static_cast<int>(i) == vis.anchorSlot)
+            ? std::wstring(kAnchorTooltip)
+            : FormatTooltip(specs[i], states_[i]);
+        ApplySlot(i, true, iconSize, tip);
+        anyRendered = true;
     }
-    ShutdownIconRenderer();
+    if (anyRendered) ShutdownIconRenderer();
 }
 
 bool TrayManager::Update(const std::array<DeviceState, 3>& states) {
     states_ = states;
     history_.SyncActive(states_);
 
-    const int iconSize = GetTaskbarIconSize();
+    const bool anyRendered = SyncVisibility(GetTaskbarIconSize());
+    if (anyRendered) ShutdownIconRenderer();
+    return anyRendered;
+}
+
+void TrayManager::EvaluateLowBatteryAlerts(const std::array<DeviceState, 3>& states) {
+    const uint64_t nowSec = GetTickCount64() / 1000ULL;
+    alertTracker_.PruneOffline(nowSec);
+    if (!lowBatteryAlert_) return;
+
+    const auto& specs = GetSlotSpecs();
+    for (size_t i = 0; i < 3; ++i) {
+        if (!states[i].online) continue;
+        for (const auto& d : states[i].items) {
+            const std::wstring devName = d.name.empty() ? std::wstring(specs[i].label) : d.name;
+            const AlertLevel lvl = alertTracker_.Evaluate(static_cast<int>(i), devName, d.percent, d.charging, nowSec);
+            if (lvl == AlertLevel::None) continue;
+            const bool critical = (lvl == AlertLevel::Critical5);
+            const std::wstring title = (critical ? L"Критический заряд: " : L"Низкий заряд: ") + devName;
+            const std::wstring body = L"Осталось " + std::to_wstring(d.percent) + L"% заряда";
+            ShowLowBatteryToast(i, title, body, critical);
+        }
+    }
+}
+
+void TrayManager::ShowLowBatteryToast(size_t slot, const std::wstring& title, const std::wstring& body, bool critical) {
+    if (slot >= 3 || !hwnd_ || !addedInTray_[slot]) return;
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = hwnd_;
+    nid.uID = GetSlotSpecs()[slot].uid;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = critical ? NIIF_ERROR : NIIF_WARNING;
+    wcsncpy_s(nid.szInfoTitle, _countof(nid.szInfoTitle), title.c_str(), _TRUNCATE);
+    wcsncpy_s(nid.szInfo, _countof(nid.szInfo), body.c_str(), _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+bool TrayManager::RefreshTheme() {
+    const bool light = IsTaskbarLightTheme();
+    if (light == lightTheme_) return false;
+    lightTheme_ = light;
+    const bool anyRendered = SyncVisibility(GetTaskbarIconSize());
+    if (anyRendered) ShutdownIconRenderer();
+    return true;
+}
+
+void TrayManager::ToggleHideOffline() {
+    hideOffline_ = !hideOffline_;
+    SaveDwordSetting(kHideOfflineValue, hideOffline_ ? 1u : 0u);
+    if (SyncVisibility(GetTaskbarIconSize())) {
+        ShutdownIconRenderer();
+    }
+}
+
+void TrayManager::ToggleLowBatteryAlert() {
+    lowBatteryAlert_ = !lowBatteryAlert_;
+    SaveDwordSetting(kLowBatteryAlertValue, lowBatteryAlert_ ? 1u : 0u);
+    if (!lowBatteryAlert_) {
+        alertTracker_.Clear();
+    }
+}
+
+bool TrayManager::SyncVisibility(int iconSize) {
+    bool online[3] = {states_[0].online, states_[1].online, states_[2].online};
+    const SlotVisibility vis = ComputeSlotVisibility(online, hideOffline_, anchorSlot_);
+    anchorSlot_ = vis.anchorSlot;
+
+    const auto& specs = GetSlotSpecs();
     bool anyRendered = false;
     for (size_t i = 0; i < 3; ++i) {
-        const auto& spec = GetSlotSpecs()[i];
-        const std::wstring tip = FormatTooltip(spec, states_[i]);
+        if (!vis.visible[i]) {
+            if (addedInTray_[i]) {
+                DeleteSlot(i);
+                anyRendered = true;
+            }
+            continue;
+        }
+        const std::wstring tip = (vis.anchorMode && static_cast<int>(i) == vis.anchorSlot)
+            ? std::wstring(kAnchorTooltip)
+            : FormatTooltip(specs[i], states_[i]);
         const auto& c = cache_[i];
-        const bool unchanged = c.valid &&
+        const bool unchanged = addedInTray_[i] &&
+                               c.valid &&
                                c.online == states_[i].online &&
                                c.percent == states_[i].percent &&
                                c.charging == states_[i].charging &&
@@ -118,31 +226,33 @@ bool TrayManager::Update(const std::array<DeviceState, 3>& states) {
                                c.iconSize == iconSize &&
                                c.tip == tip;
         if (unchanged) continue;
-        ApplySlot(i, false, iconSize);
+        ApplySlot(i, !addedInTray_[i], iconSize, tip);
         anyRendered = true;
     }
-    if (anyRendered) ShutdownIconRenderer();
     return anyRendered;
 }
 
-bool TrayManager::RefreshTheme() {
-    const bool light = IsTaskbarLightTheme();
-    if (light == lightTheme_) return false;
-    lightTheme_ = light;
-    const int iconSize = GetTaskbarIconSize();
-    for (size_t i = 0; i < 3; ++i) {
-        ApplySlot(i, false, iconSize);
+void TrayManager::DeleteSlot(size_t idx) {
+    if (addedInTray_[idx] && hwnd_) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = hwnd_;
+        nid.uID = GetSlotSpecs()[idx].uid;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
     }
-    ShutdownIconRenderer();
-    return true;
+    addedInTray_[idx] = false;
+    if (icons_[idx]) {
+        DestroyIcon(icons_[idx]);
+        icons_[idx] = nullptr;
+    }
+    cache_[idx] = SlotCache{};
 }
 
-void TrayManager::ApplySlot(size_t idx, bool add, int iconSize) {
+void TrayManager::ApplySlot(size_t idx, bool add, int iconSize, const std::wstring& tip) {
     const auto& spec = GetSlotSpecs()[idx];
     HICON nextIcon = CreateBatteryTrayIcon(spec.glyph, states_[idx], lightTheme_);
     if (!nextIcon) return;
 
-    const std::wstring tip = FormatTooltip(spec, states_[idx]);
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
     nid.hWnd = hwnd_;
@@ -155,6 +265,7 @@ void TrayManager::ApplySlot(size_t idx, bool add, int iconSize) {
     if (!Shell_NotifyIconW(add ? NIM_ADD : NIM_MODIFY, &nid) && !add) {
         Shell_NotifyIconW(NIM_ADD, &nid);
     }
+    addedInTray_[idx] = true;
 
     if (icons_[idx]) DestroyIcon(icons_[idx]);
     icons_[idx] = nextIcon;
@@ -242,6 +353,10 @@ UINT TrayManager::ShowContextMenu(HWND hwnd, UINT uid) {
     }
 
     AppendMenuW(menu, MF_STRING, IDM_REFRESH, L"Обновить сейчас");
+    AppendMenuW(menu, MF_STRING | (hideOffline_ ? MF_CHECKED : MF_UNCHECKED),
+                IDM_HIDE_OFFLINE, L"Скрывать отключённые");
+    AppendMenuW(menu, MF_STRING | (lowBatteryAlert_ ? MF_CHECKED : MF_UNCHECKED),
+                IDM_LOW_BATTERY_ALERT, L"Уведомлять при <15%");
     AppendMenuW(menu, MF_STRING | (IsAutostartEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 IDM_AUTOSTART, L"Запускать с Windows");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -283,17 +398,7 @@ uint64_t TrayManager::TakeDisconnectAddr(UINT cmdId) {
 
 void TrayManager::Shutdown() {
     for (size_t i = 0; i < 3; ++i) {
-        if (hwnd_) {
-            NOTIFYICONDATAW nid{};
-            nid.cbSize = sizeof(nid);
-            nid.hWnd = hwnd_;
-            nid.uID = GetSlotSpecs()[i].uid;
-            Shell_NotifyIconW(NIM_DELETE, &nid);
-        }
-        if (icons_[i]) {
-            DestroyIcon(icons_[i]);
-            icons_[i] = nullptr;
-        }
+        DeleteSlot(i);
     }
     hwnd_ = nullptr;
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "alert_tracker.hpp"
 #include "device.hpp"
 #include "history.hpp"
 
@@ -31,9 +32,11 @@ class SniManager {
 public:
     ~SniManager();
 
-    bool Init(bool hideOffline, bool demoMode, ControlState* ctrl);
+    bool Init(bool hideOffline, bool demoMode, bool notifyEnabled, ControlState* ctrl);
     void UpdateAll(const std::array<DeviceState, 3>& states);
     void HandleHistoryAction(size_t slotIdx, dbus_int32_t itemId);
+    void ToggleNotify();
+    bool IsNotifyEnabled() const { return notifyEnabled_; }
     void RegisterAllWatchers();
     void DrainAll();
     void Shutdown();
@@ -65,6 +68,9 @@ private:
     std::array<Slot, 3> slots_{};
     std::array<DeviceState, 3> states_{};
     DeviceHistory history_;
+    AlertTracker alertTracker_;
     bool hideOffline_ = false;
+    bool demoMode_ = false;
+    bool notifyEnabled_ = true;
     ControlState* ctrl_ = nullptr;
 };

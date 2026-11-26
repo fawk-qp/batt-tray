@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod alert_tracker;
 mod device;
 mod history;
 mod icon;
@@ -15,8 +16,9 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use tray::{
-    toggle_autostart, TrayManager, IDM_AUTOSTART, IDM_DISCONNECT_BASE, IDM_EXIT, IDM_HIST_CLEAR,
-    IDM_REFRESH, WM_APP_SCAN_DONE, WM_APP_TRAY,
+    toggle_autostart, TrayManager, IDM_AUTOSTART, IDM_DISCONNECT_BASE, IDM_EXIT,
+    IDM_HIDE_OFFLINE, IDM_HIST_CLEAR, IDM_LOW_BATTERY_ALERT, IDM_REFRESH, WM_APP_SCAN_DONE,
+    WM_APP_TRAY,
 };
 use win32::*;
 
@@ -96,6 +98,22 @@ unsafe fn handle_menu_cmd(hwnd: HWND, cmd: usize) -> bool {
             APP.with(|cell| {
                 if let Some(app) = cell.borrow().as_ref() {
                     SetEvent(app.scan_event);
+                }
+            });
+            true
+        }
+        IDM_HIDE_OFFLINE => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    app.tray.toggle_hide_offline();
+                }
+            });
+            true
+        }
+        IDM_LOW_BATTERY_ALERT => {
+            APP.with(|cell| {
+                if let Some(app) = cell.borrow_mut().as_mut() {
+                    app.tray.toggle_low_battery_alert();
                 }
             });
             true
@@ -184,9 +202,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             APP.with(|cell| {
                 if let Some(app) = cell.borrow_mut().as_mut() {
                     let snapshot = app.pending.lock().map(|g| g.clone()).unwrap_or_default();
-                    if app.tray.update(snapshot) {
+                    if app.tray.update(snapshot.clone()) {
                         trim_idle_working_set();
                     }
+                    app.tray.evaluate_low_battery_alerts(&snapshot);
                 }
             });
             0

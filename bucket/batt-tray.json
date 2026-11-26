@@ -1,0 +1,29 @@
+{
+    "version": "1.3.0",
+    "description": "Wireless peripherals battery tray indicator",
+    "homepage": "https://github.com/fawk-qp/batt-tray",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/fawk-qp/batt-tray/releases/download/v1.3.0/batt-tray-win-rust.exe",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": [
+        [
+            "batt-tray-win-rust.exe",
+            "batt-tray"
+        ]
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/fawk-qp/batt-tray/releases/download/v$version/batt-tray-win-rust.exe",
+                "hash": {
+                    "url": "https://github.com/fawk-qp/batt-tray/releases/download/v$version/SHA256SUMS.txt"
+                }
+            }
+        }
+    }
+}

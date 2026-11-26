@@ -1,3 +1,4 @@
+use crate::alert_tracker::{AlertLevel, AlertTracker};
 use crate::device::{DeviceEntry, DeviceState, SLOT_SPECS};
 use crate::history::DeviceHistory;
 use crate::icon::{create_battery_tray_icon, get_taskbar_icon_size, is_taskbar_light_theme};
@@ -12,12 +13,109 @@ pub const IDM_HEADER: usize = 2000;
 pub const IDM_REFRESH: usize = 2001;
 pub const IDM_AUTOSTART: usize = 2002;
 pub const IDM_EXIT: usize = 2003;
+pub const IDM_HIDE_OFFLINE: usize = 2004;
+pub const IDM_LOW_BATTERY_ALERT: usize = 2005;
 pub const IDM_HIST_CLEAR: usize = 2010;
 pub const IDM_HIST_DEL_BASE: usize = 2100;
 pub const IDM_DISCONNECT_BASE: usize = 2200;
 
 const RUN_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "BattTray";
+const SETTINGS_SUBKEY: &str = "Software\\BattTray";
+const HIDE_OFFLINE_VALUE: &str = "HideOffline";
+const LOW_BATTERY_ALERT_VALUE: &str = "LowBatteryAlert";
+const ANCHOR_TOOLTIP: &str = "BattTray \u{2014} нет подключённых устройств";
+
+struct SlotVisibility {
+    visible: [bool; 3],
+    anchor_mode: bool,
+    anchor_slot: usize,
+}
+
+fn compute_slot_visibility(online: [bool; 3], hide_offline: bool, last_anchor: usize) -> SlotVisibility {
+    let mut v = SlotVisibility {
+        visible: [true, true, true],
+        anchor_mode: false,
+        anchor_slot: if last_anchor < 3 { last_anchor } else { 2 },
+    };
+    if !hide_offline {
+        return v;
+    }
+    let mut online_count = 0usize;
+    let mut first_online = None;
+    for i in 0..3 {
+        v.visible[i] = online[i];
+        if online[i] {
+            online_count += 1;
+            if first_online.is_none() {
+                first_online = Some(i);
+            }
+        }
+    }
+    if online_count > 0 {
+        if !online[v.anchor_slot] {
+            if let Some(first) = first_online {
+                v.anchor_slot = first;
+            }
+        }
+        return v;
+    }
+    v.anchor_mode = true;
+    v.visible = [false, false, false];
+    v.visible[v.anchor_slot] = true;
+    v
+}
+
+fn load_dword_setting(name: &str, default_val: u32) -> u32 {
+    let subkey = to_wide(SETTINGS_SUBKEY);
+    let val_name = to_wide(name);
+    let mut val = 0u32;
+    let mut ty = 0u32;
+    let mut cb = std::mem::size_of::<u32>() as u32;
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            val_name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            &mut ty,
+            &mut val as *mut u32 as *mut c_void,
+            &mut cb,
+        )
+    };
+    if rc == ERROR_SUCCESS { val } else { default_val }
+}
+
+fn save_dword_setting(name: &str, val: u32) {
+    let subkey = to_wide(SETTINGS_SUBKEY);
+    let val_name = to_wide(name);
+    unsafe {
+        let mut key: HKEY = null_mut();
+        if RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            null(),
+            0,
+            KEY_SET_VALUE,
+            null_mut(),
+            &mut key,
+            null_mut(),
+        ) != ERROR_SUCCESS
+        {
+            return;
+        }
+        RegSetValueExW(
+            key,
+            val_name.as_ptr(),
+            0,
+            REG_DWORD,
+            &val as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as u32,
+        );
+        RegCloseKey(key);
+    }
+}
 
 #[derive(Clone, Default)]
 struct SlotCache {
@@ -33,7 +131,12 @@ struct SlotCache {
 pub struct TrayManager {
     hwnd: HWND,
     light_theme: bool,
+    hide_offline: bool,
+    low_battery_alert: bool,
+    anchor_slot: usize,
+    added_in_tray: [bool; 3],
     history: DeviceHistory,
+    alert_tracker: AlertTracker,
     states: [DeviceState; 3],
     icons: [HICON; 3],
     cache: [SlotCache; 3],
@@ -46,10 +149,17 @@ impl TrayManager {
     pub fn new(hwnd: HWND) -> Self {
         let mut history = DeviceHistory::default();
         history.load();
+        let hide_offline = load_dword_setting(HIDE_OFFLINE_VALUE, 0) != 0;
+        let low_battery_alert = load_dword_setting(LOW_BATTERY_ALERT_VALUE, 1) != 0;
         let mut mgr = Self {
             hwnd,
             light_theme: is_taskbar_light_theme(),
+            hide_offline,
+            low_battery_alert,
+            anchor_slot: 2,
+            added_in_tray: [false; 3],
             history,
+            alert_tracker: AlertTracker::new(),
             states: Default::default(),
             icons: [null_mut(); 3],
             cache: Default::default(),
@@ -58,9 +168,7 @@ impl TrayManager {
             menu_disconnect_addrs: Vec::new(),
         };
         let icon_size = get_taskbar_icon_size();
-        for i in 0..3 {
-            mgr.apply_slot(i, true, icon_size);
-        }
+        mgr.sync_visibility(icon_size);
         mgr
     }
 
@@ -70,21 +178,129 @@ impl TrayManager {
         }
         self.light_theme = is_taskbar_light_theme();
         let icon_size = get_taskbar_icon_size();
+        let online = [self.states[0].online, self.states[1].online, self.states[2].online];
+        let vis = compute_slot_visibility(online, self.hide_offline, self.anchor_slot);
+        self.anchor_slot = vis.anchor_slot;
         for i in 0..3 {
-            self.apply_slot(i, true, icon_size);
+            if !self.added_in_tray[i] {
+                continue;
+            }
+            let tip = if vis.anchor_mode && i == vis.anchor_slot {
+                ANCHOR_TOOLTIP.to_string()
+            } else {
+                format_tooltip(SLOT_SPECS[i].label, &self.states[i])
+            };
+            self.apply_slot(i, true, icon_size, &tip);
         }
     }
 
     pub fn update(&mut self, states: [DeviceState; 3]) -> bool {
         self.states = states;
         self.history.sync_active(&self.states);
+        self.sync_visibility(get_taskbar_icon_size())
+    }
 
-        let icon_size = get_taskbar_icon_size();
+    pub fn evaluate_low_battery_alerts(&mut self, states: &[DeviceState; 3]) {
+        let now_sec = unsafe { GetTickCount64() } / 1000;
+        self.alert_tracker.prune_offline(now_sec);
+        if !self.low_battery_alert {
+            return;
+        }
+        for i in 0..3 {
+            if !states[i].online {
+                continue;
+            }
+            for d in &states[i].items {
+                let dev_name = if d.name.is_empty() {
+                    SLOT_SPECS[i].label
+                } else {
+                    &d.name
+                };
+                let lvl = self
+                    .alert_tracker
+                    .evaluate(i, dev_name, d.percent, d.charging, now_sec);
+                if lvl == AlertLevel::None {
+                    continue;
+                }
+                let critical = lvl == AlertLevel::Critical5;
+                let title = if critical {
+                    format!("Критический заряд: {}", dev_name)
+                } else {
+                    format!("Низкий заряд: {}", dev_name)
+                };
+                let body = format!("Осталось {}% заряда", d.percent);
+                self.show_low_battery_toast(i, &title, &body, critical);
+            }
+        }
+    }
+
+    pub fn show_low_battery_toast(&self, slot: usize, title: &str, body: &str, critical: bool) {
+        if slot >= 3 || self.hwnd.is_null() || !self.added_in_tray[slot] {
+            return;
+        }
+        let mut nid = zero_nid(self.hwnd, SLOT_SPECS[slot].uid);
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = if critical { NIIF_ERROR } else { NIIF_WARNING };
+
+        let wide_title: Vec<u16> = title.encode_utf16().take(63).collect();
+        nid.szInfoTitle[..wide_title.len()].copy_from_slice(&wide_title);
+        nid.szInfoTitle[wide_title.len()] = 0;
+
+        let wide_body: Vec<u16> = body.encode_utf16().take(255).collect();
+        nid.szInfo[..wide_body.len()].copy_from_slice(&wide_body);
+        nid.szInfo[wide_body.len()] = 0;
+
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &mut nid);
+        }
+    }
+
+    pub fn refresh_theme(&mut self) -> bool {
+        let light = is_taskbar_light_theme();
+        if light == self.light_theme {
+            return false;
+        }
+        self.light_theme = light;
+        self.sync_visibility(get_taskbar_icon_size());
+        true
+    }
+
+    pub fn toggle_hide_offline(&mut self) {
+        self.hide_offline = !self.hide_offline;
+        save_dword_setting(HIDE_OFFLINE_VALUE, u32::from(self.hide_offline));
+        self.sync_visibility(get_taskbar_icon_size());
+    }
+
+    pub fn toggle_low_battery_alert(&mut self) {
+        self.low_battery_alert = !self.low_battery_alert;
+        save_dword_setting(LOW_BATTERY_ALERT_VALUE, u32::from(self.low_battery_alert));
+        if !self.low_battery_alert {
+            self.alert_tracker.clear();
+        }
+    }
+
+    fn sync_visibility(&mut self, icon_size: i32) -> bool {
+        let online = [self.states[0].online, self.states[1].online, self.states[2].online];
+        let vis = compute_slot_visibility(online, self.hide_offline, self.anchor_slot);
+        self.anchor_slot = vis.anchor_slot;
+
         let mut any_rendered = false;
         for i in 0..3 {
-            let tip = format_tooltip(SLOT_SPECS[i].label, &self.states[i]);
+            if !vis.visible[i] {
+                if self.added_in_tray[i] {
+                    self.delete_slot(i);
+                    any_rendered = true;
+                }
+                continue;
+            }
+            let tip = if vis.anchor_mode && i == vis.anchor_slot {
+                ANCHOR_TOOLTIP.to_string()
+            } else {
+                format_tooltip(SLOT_SPECS[i].label, &self.states[i])
+            };
             let c = &self.cache[i];
-            let unchanged = c.valid
+            let unchanged = self.added_in_tray[i]
+                && c.valid
                 && c.online == self.states[i].online
                 && c.percent == self.states[i].percent
                 && c.charging == self.states[i].charging
@@ -94,23 +310,25 @@ impl TrayManager {
             if unchanged {
                 continue;
             }
-            self.apply_slot(i, false, icon_size);
+            self.apply_slot(i, !self.added_in_tray[i], icon_size, &tip);
             any_rendered = true;
         }
         any_rendered
     }
 
-    pub fn refresh_theme(&mut self) -> bool {
-        let light = is_taskbar_light_theme();
-        if light == self.light_theme {
-            return false;
+    fn delete_slot(&mut self, idx: usize) {
+        unsafe {
+            if self.added_in_tray[idx] && !self.hwnd.is_null() {
+                let mut nid = zero_nid(self.hwnd, SLOT_SPECS[idx].uid);
+                Shell_NotifyIconW(NIM_DELETE, &mut nid);
+            }
+            self.added_in_tray[idx] = false;
+            if !self.icons[idx].is_null() {
+                DestroyIcon(self.icons[idx]);
+                self.icons[idx] = null_mut();
+            }
         }
-        self.light_theme = light;
-        let icon_size = get_taskbar_icon_size();
-        for i in 0..3 {
-            self.apply_slot(i, false, icon_size);
-        }
-        true
+        self.cache[idx] = SlotCache::default();
     }
 
     // Builds the popup HMENU without running TrackPopupMenu so RefCell borrows can be released before the modal loop.
@@ -195,10 +413,16 @@ impl TrayManager {
             }
 
             let s_refresh = to_wide("Обновить сейчас");
+            let s_hide = to_wide("Скрывать отключённые");
+            let s_alert = to_wide("Уведомлять при <15%");
             let s_auto = to_wide("Запускать с Windows");
             let s_exit = to_wide("Выход");
 
             AppendMenuW(menu, MF_STRING, IDM_REFRESH, s_refresh.as_ptr());
+            let hide_flags = MF_STRING | if self.hide_offline { MF_CHECKED } else { MF_UNCHECKED };
+            AppendMenuW(menu, hide_flags, IDM_HIDE_OFFLINE, s_hide.as_ptr());
+            let alert_flags = MF_STRING | if self.low_battery_alert { MF_CHECKED } else { MF_UNCHECKED };
+            AppendMenuW(menu, alert_flags, IDM_LOW_BATTERY_ALERT, s_alert.as_ptr());
             let auto_flags = MF_STRING | if is_autostart_enabled() { MF_CHECKED } else { MF_UNCHECKED };
             AppendMenuW(menu, auto_flags, IDM_AUTOSTART, s_auto.as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -258,29 +482,19 @@ impl TrayManager {
     }
 
     pub fn shutdown(&mut self) {
-        unsafe {
-            for i in 0..3 {
-                if !self.hwnd.is_null() {
-                    let mut nid = zero_nid(self.hwnd, SLOT_SPECS[i].uid);
-                    Shell_NotifyIconW(NIM_DELETE, &mut nid);
-                }
-                if !self.icons[i].is_null() {
-                    DestroyIcon(self.icons[i]);
-                    self.icons[i] = null_mut();
-                }
-            }
+        for i in 0..3 {
+            self.delete_slot(i);
         }
         self.hwnd = null_mut();
     }
 
-    fn apply_slot(&mut self, idx: usize, add: bool, icon_size: i32) {
+    fn apply_slot(&mut self, idx: usize, add: bool, icon_size: i32, tip: &str) {
         let spec = &SLOT_SPECS[idx];
         let next_icon = create_battery_tray_icon(spec.glyph, &self.states[idx], self.light_theme);
         if next_icon.is_null() {
             return;
         }
 
-        let tip = format_tooltip(spec.label, &self.states[idx]);
         let mut nid = zero_nid(self.hwnd, spec.uid);
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         nid.uCallbackMessage = WM_APP_TRAY;
@@ -295,6 +509,7 @@ impl TrayManager {
             if Shell_NotifyIconW(cmd, &mut nid) == 0 && !add {
                 Shell_NotifyIconW(NIM_ADD, &mut nid);
             }
+            self.added_in_tray[idx] = true;
             if !self.icons[idx].is_null() {
                 DestroyIcon(self.icons[idx]);
             }
@@ -307,7 +522,7 @@ impl TrayManager {
             light_theme: self.light_theme,
             percent: self.states[idx].percent,
             icon_size,
-            tip,
+            tip: tip.to_string(),
         };
     }
 }

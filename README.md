@@ -5,7 +5,14 @@ Small tray utility that shows battery level for wireless mice, keyboards and hea
 - Windows: `NOTIFYICONDATA` icons drawn with GDI. Battery comes from PnP `DEVPKEY_Bluetooth_Battery`, with a BLE GATT (`0x180F` / `0x2A19`) fallback.
 - Linux: `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` over raw libdbus, no GTK/Qt. Works on KDE, GNOME AppIndicator, Waybar/Hyprland/Sway, XFCE.
 
-Disconnected devices stay in a small history file (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be dropped from the tray menu. It is plaintext, you can just delete it.
+Hiding empty slots on Windows can be toggled from the tray menu (keeps one anchor icon when nothing is connected), and low-battery alerts (`<=15%` / `<=5%`) can be muted per session or in the menu. Disconnected devices stay in a small history file (`~/.local/state/batt-tray/history.tsv` on Linux, `%LOCALAPPDATA%\BattTray` on Windows) and can be dropped from the tray menu. It is plaintext, you can just delete it.
+
+## Install (Windows Scoop)
+
+```
+scoop bucket add batt-tray https://github.com/fawk-qp/batt-tray
+scoop install batt-tray/batt-tray
+```
 
 ## Build
 
@@ -34,7 +41,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now batt-tray
 ```
 
-Flags: `--hide-offline` marks disconnected devices as passive instead of dropping them, `--demo` runs on synthetic data without touching hardware or D-Bus.
+Flags: `--hide-offline` marks disconnected devices as passive instead of dropping them, `--no-notify` disables low-battery desktop notifications, `--demo` runs on synthetic data without touching hardware or D-Bus.
 
 ## Releases
 

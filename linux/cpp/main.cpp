@@ -95,9 +95,11 @@ int main(int argc, char** argv) {
 
     bool hideOffline = false;
     bool demoMode = false;
+    bool notifyEnabled = true;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--hide-offline") == 0) hideOffline = true;
         else if (std::strcmp(argv[i], "--demo") == 0) demoMode = true;
+        else if (std::strcmp(argv[i], "--no-notify") == 0) notifyEnabled = false;
     }
 
     FdGuard lockFd(AcquireInstanceLock());
@@ -127,7 +129,7 @@ int main(int argc, char** argv) {
     }
 
     SniManager sni;
-    if (!sni.Init(hideOffline, demoMode, &ctrl)) {
+    if (!sni.Init(hideOffline, demoMode, notifyEnabled, &ctrl)) {
         if (sysBus) {
             dbus_connection_close(sysBus);
             dbus_connection_unref(sysBus);

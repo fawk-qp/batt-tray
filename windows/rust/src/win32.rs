@@ -66,6 +66,9 @@ pub const NIM_DELETE: u32 = 0x0000_0002;
 pub const NIF_MESSAGE: u32 = 0x0000_0001;
 pub const NIF_ICON: u32 = 0x0000_0002;
 pub const NIF_TIP: u32 = 0x0000_0004;
+pub const NIF_INFO: u32 = 0x0000_0010;
+pub const NIIF_WARNING: u32 = 0x0000_0002;
+pub const NIIF_ERROR: u32 = 0x0000_0003;
 
 pub const MF_STRING: u32 = 0x0000_0000;
 pub const MF_GRAYED: u32 = 0x0000_0001;
@@ -83,6 +86,7 @@ pub const RRF_RT_REG_SZ: u32 = 0x0000_0002;
 pub const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
 pub const KEY_SET_VALUE: u32 = 0x0002;
 pub const REG_SZ: u32 = 1;
+pub const REG_DWORD: u32 = 4;
 
 pub const WAIT_OBJECT_0: u32 = 0x0000_0000;
 pub const WAIT_FAILED: u32 = 0xFFFF_FFFF;
@@ -598,6 +602,17 @@ extern "system" {
         pcbData: *mut u32,
     ) -> i32;
     pub fn RegOpenKeyExW(hKey: HKEY, lpSubKey: *const u16, ulOptions: u32, samDesired: u32, phkResult: *mut HKEY) -> i32;
+    pub fn RegCreateKeyExW(
+        hKey: HKEY,
+        lpSubKey: *const u16,
+        Reserved: u32,
+        lpClass: *const u16,
+        dwOptions: u32,
+        samDesired: u32,
+        lpSecurityAttributes: *mut c_void,
+        phkResult: *mut HKEY,
+        lpdwDisposition: *mut u32,
+    ) -> i32;
     pub fn RegSetValueExW(hKey: HKEY, lpValueName: *const u16, Reserved: u32, dwType: u32, lpData: *const u8, cbData: u32) -> i32;
     pub fn RegDeleteValueW(hKey: HKEY, lpValueName: *const u16) -> i32;
     pub fn RegCloseKey(hKey: HKEY) -> i32;

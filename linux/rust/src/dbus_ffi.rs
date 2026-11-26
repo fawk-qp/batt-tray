@@ -152,6 +152,7 @@ extern "C" {
     pub fn dbus_message_new_method_return(msg: *mut DBusMessage) -> *mut DBusMessage;
     pub fn dbus_message_new_error(msg: *mut DBusMessage, name: *const c_char, text: *const c_char) -> *mut DBusMessage;
     pub fn dbus_message_new_signal(path: *const c_char, iface: *const c_char, name: *const c_char) -> *mut DBusMessage;
+    pub fn dbus_message_set_no_reply(msg: *mut DBusMessage, flag: u32);
     pub fn dbus_message_unref(msg: *mut DBusMessage);
     pub fn dbus_message_get_type(msg: *mut DBusMessage) -> c_int;
     pub fn dbus_message_get_interface(msg: *mut DBusMessage) -> *const c_char;
@@ -279,6 +280,20 @@ pub unsafe fn append_var_u32(it: *mut DBusMessageIter, u: u32) {
     dbus_message_iter_close_container(it, &mut v);
 }
 
+pub unsafe fn append_var_i32(it: *mut DBusMessageIter, val: i32) {
+    let mut v = zero_iter();
+    dbus_message_iter_open_container(it, DBUS_TYPE_VARIANT, b"i\0".as_ptr() as *const c_char, &mut v);
+    dbus_message_iter_append_basic(&mut v, DBUS_TYPE_INT32, &val as *const i32 as *const c_void);
+    dbus_message_iter_close_container(it, &mut v);
+}
+
+pub unsafe fn append_var_byte(it: *mut DBusMessageIter, val: u8) {
+    let mut v = zero_iter();
+    dbus_message_iter_open_container(it, DBUS_TYPE_VARIANT, b"y\0".as_ptr() as *const c_char, &mut v);
+    dbus_message_iter_append_basic(&mut v, DBUS_TYPE_BYTE, &val as *const u8 as *const c_void);
+    dbus_message_iter_close_container(it, &mut v);
+}
+
 pub unsafe fn append_var_empty_pixmaps(it: *mut DBusMessageIter) {
     let mut v = zero_iter();
     let mut a = zero_iter();
@@ -301,6 +316,22 @@ pub unsafe fn append_dict_bool(dict: *mut DBusMessageIter, k: &str, val: bool) {
     dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, null(), &mut e);
     append_str(&mut e, k);
     append_var_bool(&mut e, val);
+    dbus_message_iter_close_container(dict, &mut e);
+}
+
+pub unsafe fn append_dict_i32(dict: *mut DBusMessageIter, k: &str, val: i32) {
+    let mut e = zero_iter();
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, null(), &mut e);
+    append_str(&mut e, k);
+    append_var_i32(&mut e, val);
+    dbus_message_iter_close_container(dict, &mut e);
+}
+
+pub unsafe fn append_dict_byte(dict: *mut DBusMessageIter, k: &str, val: u8) {
+    let mut e = zero_iter();
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, null(), &mut e);
+    append_str(&mut e, k);
+    append_var_byte(&mut e, val);
     dbus_message_iter_close_container(dict, &mut e);
 }
 

@@ -1,3 +1,4 @@
+use crate::alert_tracker::{AlertLevel, AlertTracker};
 use crate::dbus_ffi::*;
 use crate::device::{DeviceKind, DeviceState, SLOT_SPECS};
 use crate::history::DeviceHistory;
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 static HIDE_OFFLINE: AtomicBool = AtomicBool::new(false);
+static DEMO_MODE: AtomicBool = AtomicBool::new(false);
+static NOTIFY_ENABLED: AtomicBool = AtomicBool::new(true);
 
 const SNI_XML: &str = concat!(
     "<node><interface name='org.kde.StatusNotifierItem'>",
@@ -132,6 +135,8 @@ thread_local! {
     static SLOTS: RefCell<Vec<TraySlot>> = const { RefCell::new(Vec::new()) };
     static STATES: RefCell<[DeviceState; 3]> = RefCell::new(Default::default());
     static HISTORY: RefCell<DeviceHistory> = RefCell::new(DeviceHistory::default());
+    static ALERT_TRACKER: RefCell<AlertTracker> = RefCell::new(AlertTracker::new());
+    static START_TIME: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static SCAN_DUE: RefCell<Option<Instant>> = const { RefCell::new(None) };
 }
 
@@ -276,6 +281,17 @@ unsafe fn append_menu_item_props(props: *mut DBusMessageIter, s: &SlotSnapshot, 
             append_dict_bool(props, "enabled", true);
             append_dict_bool(props, "visible", true);
         }
+        4 => {
+            append_dict_str(props, "label", "Уведомлять при <15%");
+            append_dict_str(props, "toggle-type", "checkmark");
+            append_dict_i32(
+                props,
+                "toggle-state",
+                if NOTIFY_ENABLED.load(Ordering::Relaxed) { 1 } else { 0 },
+            );
+            append_dict_bool(props, "enabled", true);
+            append_dict_bool(props, "visible", true);
+        }
         3 => {
             append_dict_str(props, "label", "Выход");
             append_dict_bool(props, "enabled", true);
@@ -310,6 +326,7 @@ unsafe fn append_menu_item(parent: *mut DBusMessageIter, s: &SlotSnapshot, id: i
             append_menu_item(&mut ch, s, 23, true);
         }
         append_menu_item(&mut ch, s, 1, true);
+        append_menu_item(&mut ch, s, 4, true);
         append_menu_item(&mut ch, s, 2, true);
         append_menu_item(&mut ch, s, 3, true);
     } else if id == 20 {
@@ -519,7 +536,7 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
                 ids.push(22);
                 ids.push(23);
             }
-            ids.extend_from_slice(&[1, 2, 3]);
+            ids.extend_from_slice(&[1, 4, 2, 3]);
 
             let mut it = zero_iter();
             let mut arr = zero_iter();
@@ -556,6 +573,8 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
                     if ev == "clicked" {
                         if id == 1 {
                             schedule_scan(Duration::ZERO);
+                        } else if id == 4 {
+                            toggle_notify();
                         } else if id == 3 {
                             stop_running();
                         } else if id == 22 || (200..300).contains(&id) {
@@ -572,6 +591,76 @@ unsafe extern "C" fn handle_menu(conn: *mut DBusConnection, msg: *mut DBusMessag
 
     send_if_some(conn, rep);
     DBUS_HANDLER_RESULT_HANDLED
+}
+
+unsafe fn toggle_notify() {
+    let next = !NOTIFY_ENABLED.load(Ordering::Relaxed);
+    NOTIFY_ENABLED.store(next, Ordering::Relaxed);
+    if !next {
+        ALERT_TRACKER.with(|a| a.borrow_mut().clear());
+    }
+    let emits: Vec<(*mut DBusConnection, u32)> = SLOTS.with(|s_cell| {
+        let mut slots = s_cell.borrow_mut();
+        slots
+            .iter_mut()
+            .map(|slot| {
+                slot.menu_revision = slot.menu_revision.wrapping_add(1).max(1);
+                (slot.conn, slot.menu_revision)
+            })
+            .collect()
+    });
+    for (conn, rev) in emits {
+        emit_layout_updated(conn, rev);
+        dbus_connection_flush(conn);
+    }
+}
+
+unsafe fn send_desktop_notification(conn: *mut DBusConnection, name: &str, percent: i32, critical: bool) {
+    if conn.is_null() {
+        return;
+    }
+    let Some(msg) = DbusMsg::new(dbus_message_new_method_call(
+        b"org.freedesktop.Notifications\0".as_ptr() as *const c_char,
+        b"/org/freedesktop/Notifications\0".as_ptr() as *const c_char,
+        b"org.freedesktop.Notifications\0".as_ptr() as *const c_char,
+        b"Notify\0".as_ptr() as *const c_char,
+    )) else {
+        return;
+    };
+    dbus_message_set_no_reply(msg.0, 1);
+
+    let app_icon = if critical { "battery-caution" } else { "battery-low" };
+    let summary = if critical {
+        format!("Критический заряд: {}", name)
+    } else {
+        format!("Низкий заряд: {}", name)
+    };
+    let body = format!("Осталось {}% заряда", percent);
+
+    let mut it = zero_iter();
+    let mut actions = zero_iter();
+    let mut hints = zero_iter();
+    dbus_message_iter_init_append(msg.0, &mut it);
+    append_str(&mut it, "batt-tray");
+    let replaces_id: u32 = 0;
+    dbus_message_iter_append_basic(&mut it, DBUS_TYPE_UINT32, &replaces_id as *const u32 as *const c_void);
+    append_str(&mut it, app_icon);
+    append_str(&mut it, &summary);
+    append_str(&mut it, &body);
+
+    dbus_message_iter_open_container(&mut it, DBUS_TYPE_ARRAY, b"s\0".as_ptr() as *const c_char, &mut actions);
+    dbus_message_iter_close_container(&mut it, &mut actions);
+
+    dbus_message_iter_open_container(&mut it, DBUS_TYPE_ARRAY, b"{sv}\0".as_ptr() as *const c_char, &mut hints);
+    append_dict_byte(&mut hints, "urgency", if critical { 2 } else { 1 });
+    append_dict_str(&mut hints, "category", "device.battery");
+    dbus_message_iter_close_container(&mut it, &mut hints);
+
+    let expire_ms: i32 = 6000;
+    dbus_message_iter_append_basic(&mut it, DBUS_TYPE_INT32, &expire_ms as *const i32 as *const c_void);
+
+    dbus_connection_send(conn, msg.0, null_mut());
+    dbus_connection_flush(conn);
 }
 
 unsafe fn register_watcher(conn: *mut DBusConnection, bus_name: &str) {
@@ -711,8 +800,11 @@ unsafe extern "C" fn watcher_filter(_: *mut DBusConnection, msg: *mut DBusMessag
     DBUS_HANDLER_RESULT_NOT_YET_HANDLED
 }
 
-pub unsafe fn init_slots(hide_offline: bool, demo_mode: bool) -> Option<[*mut DBusConnection; 3]> {
+pub unsafe fn init_slots(hide_offline: bool, demo_mode: bool, notify_enabled: bool) -> Option<[*mut DBusConnection; 3]> {
     HIDE_OFFLINE.store(hide_offline, Ordering::Relaxed);
+    DEMO_MODE.store(demo_mode, Ordering::Relaxed);
+    NOTIFY_ENABLED.store(notify_enabled, Ordering::Relaxed);
+    START_TIME.with(|st| *st.borrow_mut() = Some(Instant::now()));
     HISTORY.with(|h| h.borrow_mut().load(demo_mode));
 
     let pid = getpid();
@@ -785,7 +877,7 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
             .collect()
     });
 
-    for u in updates {
+    for u in &updates {
         let any = u.tip_ch || u.lbl_ch || u.menu_ch || u.ov_ch || u.st_ch;
         if u.tip_ch {
             emit_sig(u.conn, "NewTitle", None);
@@ -807,6 +899,41 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
         if any {
             dbus_connection_flush(u.conn);
         }
+    }
+
+    let now_sec = START_TIME.with(|st| st.borrow().map(|t| t.elapsed().as_secs()).unwrap_or(0));
+    let notify_on = !DEMO_MODE.load(Ordering::Relaxed) && NOTIFY_ENABLED.load(Ordering::Relaxed);
+    let mut pending_notifs: Vec<(*mut DBusConnection, String, i32, bool)> = Vec::new();
+    ALERT_TRACKER.with(|a| {
+        let mut tracker = a.borrow_mut();
+        tracker.prune_offline(now_sec);
+        if !notify_on {
+            return;
+        }
+        for (i, slot_state) in found.iter().enumerate() {
+            if !slot_state.online {
+                continue;
+            }
+            for d in &slot_state.items {
+                let dev_name = if d.name.is_empty() {
+                    SLOT_SPECS[i].label
+                } else {
+                    &d.name
+                };
+                let lvl = tracker.evaluate(i, dev_name, d.percent, d.charging, now_sec);
+                if lvl != AlertLevel::None {
+                    pending_notifs.push((
+                        updates[i].conn,
+                        dev_name.to_string(),
+                        d.percent,
+                        lvl == AlertLevel::Critical5,
+                    ));
+                }
+            }
+        }
+    });
+    for (conn, name, pct, critical) in pending_notifs {
+        send_desktop_notification(conn, &name, pct, critical);
     }
 }
 

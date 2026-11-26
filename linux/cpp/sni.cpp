@@ -98,6 +98,13 @@ void AppendVariantBool(DBusMessageIter* it, bool b) {
     dbus_message_iter_close_container(it, &v);
 }
 
+void AppendVariantI32(DBusMessageIter* it, dbus_int32_t val) {
+    DBusMessageIter v;
+    dbus_message_iter_open_container(it, DBUS_TYPE_VARIANT, "i", &v);
+    dbus_message_iter_append_basic(&v, DBUS_TYPE_INT32, &val);
+    dbus_message_iter_close_container(it, &v);
+}
+
 void AppendVariantU32(DBusMessageIter* it, uint32_t u) {
     dbus_uint32_t du = u;
     DBusMessageIter v;
@@ -143,6 +150,14 @@ void AppendDictBool(DBusMessageIter* dict, const char* k, bool val) {
     dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, nullptr, &e);
     dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &k);
     AppendVariantBool(&e, val);
+    dbus_message_iter_close_container(dict, &e);
+}
+
+void AppendDictI32(DBusMessageIter* dict, const char* k, dbus_int32_t val) {
+    DBusMessageIter e;
+    dbus_message_iter_open_container(dict, DBUS_TYPE_DICT_ENTRY, nullptr, &e);
+    dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &k);
+    AppendVariantI32(&e, val);
     dbus_message_iter_close_container(dict, &e);
 }
 
@@ -203,6 +218,12 @@ void AppendMenuItemProps(DBusMessageIter* props, const SniManager::Slot& s, dbus
         AppendDictStr(props, "label", "Обновить сейчас");
         AppendDictBool(props, "enabled", true);
         AppendDictBool(props, "visible", true);
+    } else if (id == 4) {
+        AppendDictStr(props, "label", "Уведомлять при <15%");
+        AppendDictStr(props, "toggle-type", "checkmark");
+        AppendDictI32(props, "toggle-state", (s.owner && s.owner->IsNotifyEnabled()) ? 1 : 0);
+        AppendDictBool(props, "enabled", true);
+        AppendDictBool(props, "visible", true);
     } else if (id == 3) {
         AppendDictStr(props, "label", "Выход");
         AppendDictBool(props, "enabled", true);
@@ -231,6 +252,7 @@ void AppendMenuItem(DBusMessageIter* parent, const SniManager::Slot& s, dbus_int
             AppendMenuItem(&children, s, 23, true);
         }
         AppendMenuItem(&children, s, 1, true);
+        AppendMenuItem(&children, s, 4, true);
         AppendMenuItem(&children, s, 2, true);
         AppendMenuItem(&children, s, 3, true);
     } else if (id == 20) {
@@ -375,6 +397,7 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
                 ids.push_back(23);
             }
             ids.push_back(1);
+            ids.push_back(4);
             ids.push_back(2);
             ids.push_back(3);
 
@@ -409,6 +432,8 @@ DBusHandlerResult HandleMenu(DBusConnection* conn, DBusMessage* msg, void* data)
                 if (ev && std::strcmp(ev, "clicked") == 0 && slot->owner) {
                     if (id == 1 && slot->owner->Control()) {
                         slot->owner->Control()->scanDueMs = 0;
+                    } else if (id == 4) {
+                        slot->owner->ToggleNotify();
                     } else if (id == 3 && slot->owner->Control()) {
                         slot->owner->Control()->running = false;
                     } else if (id == 22 || (id >= 200 && id < 300)) {
@@ -479,6 +504,57 @@ void EmitMenuLayoutUpdated(SniManager::Slot& s) {
     dbus_connection_send(s.conn, sig.p, nullptr);
 }
 
+void SendDesktopNotification(DBusConnection* conn, const std::string& name, int percent, bool critical) {
+    if (!conn) return;
+    DbusMsg msg(dbus_message_new_method_call(
+        "org.freedesktop.Notifications",
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify"));
+    if (!msg) return;
+    dbus_message_set_no_reply(msg.p, TRUE);
+
+    const char* appName = "batt-tray";
+    dbus_uint32_t replacesId = 0;
+    const char* appIcon = critical ? "battery-caution" : "battery-low";
+    const std::string summary = std::string(critical ? "Критический заряд: " : "Низкий заряд: ") + name;
+    const std::string body = "Осталось " + std::to_string(percent) + "% заряда";
+    const char* summaryPtr = summary.c_str();
+    const char* bodyPtr = body.c_str();
+    dbus_int32_t expireMs = 6000;
+
+    DBusMessageIter it, actions, hints;
+    dbus_message_iter_init_append(msg.p, &it);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &appName);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_UINT32, &replacesId);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &appIcon);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &summaryPtr);
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_STRING, &bodyPtr);
+
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "s", &actions);
+    dbus_message_iter_close_container(&it, &actions);
+
+    dbus_message_iter_open_container(&it, DBUS_TYPE_ARRAY, "{sv}", &hints);
+    {
+        DBusMessageIter e, v;
+        const char* k = "urgency";
+        uint8_t urg = critical ? 2u : 1u;
+        dbus_message_iter_open_container(&hints, DBUS_TYPE_DICT_ENTRY, nullptr, &e);
+        dbus_message_iter_append_basic(&e, DBUS_TYPE_STRING, &k);
+        dbus_message_iter_open_container(&e, DBUS_TYPE_VARIANT, "y", &v);
+        dbus_message_iter_append_basic(&v, DBUS_TYPE_BYTE, &urg);
+        dbus_message_iter_close_container(&e, &v);
+        dbus_message_iter_close_container(&hints, &e);
+    }
+    AppendDictStr(&hints, "category", "device.battery");
+    dbus_message_iter_close_container(&it, &hints);
+
+    dbus_message_iter_append_basic(&it, DBUS_TYPE_INT32, &expireMs);
+
+    dbus_connection_send(conn, msg.p, nullptr);
+    dbus_connection_flush(conn);
+}
+
 } // namespace
 
 int64_t NowMs() {
@@ -503,8 +579,10 @@ SniManager::~SniManager() {
     Shutdown();
 }
 
-bool SniManager::Init(bool hideOffline, bool demoMode, ControlState* ctrl) {
+bool SniManager::Init(bool hideOffline, bool demoMode, bool notifyEnabled, ControlState* ctrl) {
     hideOffline_ = hideOffline;
+    demoMode_ = demoMode;
+    notifyEnabled_ = notifyEnabled;
     ctrl_ = ctrl;
     history_.Load(demoMode);
 
@@ -567,6 +645,32 @@ void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
     history_.SyncActive(states_);
     for (size_t i = 0; i < 3; ++i) {
         UpdateSlot(slots_[i], states_[i]);
+    }
+
+    const uint64_t nowSec = static_cast<uint64_t>(NowMs() / 1000);
+    alertTracker_.PruneOffline(nowSec);
+    if (!demoMode_ && notifyEnabled_) {
+        for (size_t i = 0; i < 3; ++i) {
+            if (!states_[i].online) continue;
+            for (const auto& d : states_[i].items) {
+                const std::string devName = d.name.empty() ? std::string(slots_[i].spec->label) : d.name;
+                const AlertLevel lvl = alertTracker_.Evaluate(static_cast<int>(i), devName, d.percent, d.charging, nowSec);
+                if (lvl == AlertLevel::None) continue;
+                SendDesktopNotification(slots_[i].conn, devName, d.percent, lvl == AlertLevel::Critical5);
+            }
+        }
+    }
+}
+
+void SniManager::ToggleNotify() {
+    notifyEnabled_ = !notifyEnabled_;
+    if (!notifyEnabled_) {
+        alertTracker_.Clear();
+    }
+    for (auto& s : slots_) {
+        ++s.menuRevision;
+        EmitMenuLayoutUpdated(s);
+        if (s.conn) dbus_connection_flush(s.conn);
     }
 }
 
