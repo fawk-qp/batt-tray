@@ -6,6 +6,6 @@ Commands:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/fawk-qp/batt-tray/releases/download/v1.3.0/batt-tray-win-rust.exe
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: 5B2EA18CB1822EB82CF340ADBEAD292E89149E01BCD07F6FEEB8945B0A073EE9
 ManifestType: installer
 ManifestVersion: 1.6.0

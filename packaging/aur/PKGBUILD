@@ -12,7 +12,7 @@ source=(
     "batt-tray-${pkgver}-x86_64::https://github.com/fawk-qp/batt-tray/releases/download/v${pkgver}/batt-tray-linux-rust"
     "batt-tray-${pkgver}.service::https://raw.githubusercontent.com/fawk-qp/batt-tray/v${pkgver}/linux/batt-tray.service"
 )
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000' 'SKIP')
+sha256sums=('f79fad3ea224a51adc4faec78b547514bc7d404a08a3cc54d1e41ef7734a2eae' 'SKIP')
 
 package() {
     install -Dm755 "${srcdir}/batt-tray-${pkgver}-x86_64" "${pkgdir}/usr/bin/batt-tray"
