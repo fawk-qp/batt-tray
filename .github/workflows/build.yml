@@ -38,6 +38,20 @@ jobs:
         with:
           toolchain: 1.100.0
 
+      - name: Toolchain versions
+        shell: pwsh
+        run: |
+          cmd /c cl 2>&1 | Select-Object -First 1
+          rustc --version
+          cargo --version
+
+      - name: Run Windows C++ tests
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /MT /utf-8 /EHsc /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /I windows\cpp ^
+            tests\win_cpp_tests.cpp windows\cpp\device.cpp /Fe:%TEMP%\win_cpp_tests.exe /Fo:%TEMP%\
+          %TEMP%\win_cpp_tests.exe
+
       - name: Build Windows Rust
         shell: pwsh
         run: |
@@ -78,6 +92,19 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: 1.100.0
+
+      - name: Toolchain versions
+        run: |
+          g++ --version | head -n 1
+          pkg-config --modversion dbus-1
+          rustc --version
+          cargo --version
+
+      - name: Run Linux C++ tests
+        run: |
+          g++ -std=c++17 -Os -fno-exceptions -fno-rtti -Wall -Wextra -Werror \
+            -I linux/cpp tests/linux_cpp_tests.cpp linux/cpp/device.cpp -o /tmp/linux_cpp_tests
+          /tmp/linux_cpp_tests
 
       - name: Build Linux Rust
         run: |

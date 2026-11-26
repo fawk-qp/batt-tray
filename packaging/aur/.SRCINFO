@@ -1,0 +1,16 @@
+pkgbase = batt-tray-bin
+	pkgdesc = Wireless peripherals battery tray indicator
+	pkgver = 1.4.0
+	pkgrel = 1
+	url = https://github.com/fawk-qp/batt-tray
+	arch = x86_64
+	license = MIT
+	depends = dbus
+	provides = batt-tray
+	conflicts = batt-tray
+	source = batt-tray-1.4.0-x86_64::https://github.com/fawk-qp/batt-tray/releases/download/v1.4.0/batt-tray-linux-rust
+	source = batt-tray-1.4.0.service::https://raw.githubusercontent.com/fawk-qp/batt-tray/v1.4.0/linux/batt-tray.service
+	sha256sums = 4c616e2cd500caf31e5abddb2b6bea35fc9942cba7f58a16441e036376d420f5
+	sha256sums = eeed0cf79a842d101375074f2a1bfb66b75322d2c89d9de4b20708d77b3a3716
+
+pkgname = batt-tray-bin
