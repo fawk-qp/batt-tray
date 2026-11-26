@@ -83,10 +83,12 @@ void EnsureDirRecursive(const std::string& dir) {
 }
 
 bool MatchesActive(const HistoryItem& item, const std::vector<DeviceEntry>& activeItems) {
-    const std::string itemLow = ToLower(item.name);
+    const std::string itemLow = ToLower(StripBatteryDetailSuffix(item.name));
     for (const auto& act : activeItems) {
-        if (!item.key.empty() && item.key == act.key) return true;
-        if (!itemLow.empty() && itemLow == ToLower(act.name)) return true;
+        const std::string actBase = StripBatteryDetailSuffix(act.name);
+        const std::string actKey = ToLower(actBase);
+        if (!item.key.empty() && (item.key == act.key || (!actKey.empty() && item.key == actKey))) return true;
+        if (!itemLow.empty() && itemLow == actKey) return true;
     }
     return false;
 }
@@ -250,14 +252,16 @@ void DeviceHistory::SyncActive(const std::array<DeviceState, 3>& active) {
     for (size_t k = 0; k < 3; ++k) {
         const DeviceKind kind = static_cast<DeviceKind>(k);
         for (const auto& d : active[k].items) {
-            if (d.key.empty() || d.percent < 0 || d.percent > 100) continue;
+            const std::string baseName = StripBatteryDetailSuffix(d.name);
+            const std::string baseKey = baseName.empty() ? d.key : ToLower(baseName);
+            if (baseKey.empty() || d.percent < 0 || d.percent > 100) continue;
             auto it = std::find_if(items_.begin(), items_.end(), [&](const HistoryItem& h) {
-                return h.kind == kind && (h.key == d.key || (!d.name.empty() && ToLower(h.name) == ToLower(d.name)));
+                return h.kind == kind && (h.key == baseKey || (!baseName.empty() && ToLower(StripBatteryDetailSuffix(h.name)) == baseKey));
             });
             if (it != items_.end()) {
-                if (it->percent != d.percent || (!d.name.empty() && it->name != d.name) || it->key != d.key) {
-                    it->key = d.key;
-                    if (!d.name.empty()) it->name = d.name;
+                if (it->percent != d.percent || (!baseName.empty() && it->name != baseName) || it->key != baseKey) {
+                    it->key = baseKey;
+                    if (!baseName.empty()) it->name = baseName;
                     it->percent = d.percent;
                     it->lastSeenUnix = now;
                     dirty = true;
@@ -266,7 +270,7 @@ void DeviceHistory::SyncActive(const std::array<DeviceState, 3>& active) {
                     dirty = true;
                 }
             } else {
-                items_.push_back({kind, d.key, d.name, d.percent, now});
+                items_.push_back({kind, baseKey, baseName, d.percent, now});
                 dirty = true;
             }
         }

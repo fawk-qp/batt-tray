@@ -26,6 +26,7 @@ pub const DBUS_HANDLER_RESULT_NOT_YET_HANDLED: c_int = 1;
 pub const DBUS_NAME_FLAG_DO_NOT_QUEUE: u32 = 0x4;
 
 pub const POLLIN: i16 = 0x0001;
+pub const POLLOUT: i16 = 0x0004;
 pub const SIG_BLOCK: c_int = 0;
 pub const SIGINT: c_int = 2;
 pub const SIGTERM: c_int = 15;
@@ -142,6 +143,7 @@ extern "C" {
     pub fn dbus_connection_close(c: *mut DBusConnection);
     pub fn dbus_connection_unref(c: *mut DBusConnection);
     pub fn dbus_connection_flush(c: *mut DBusConnection);
+    pub fn dbus_connection_has_messages_to_send(c: *mut DBusConnection) -> u32;
     pub fn dbus_connection_read_write(c: *mut DBusConnection, timeout_ms: c_int) -> u32;
     pub fn dbus_connection_dispatch(c: *mut DBusConnection) -> c_int;
     pub fn dbus_connection_get_unix_fd(c: *mut DBusConnection, fd: *mut c_int) -> u32;
@@ -343,7 +345,6 @@ pub unsafe fn drain_conn(c: *mut DBusConnection) {
     }
     dbus_connection_read_write(c, 0);
     while dbus_connection_dispatch(c) == DBUS_DISPATCH_DATA_REMAINS {}
-    dbus_connection_flush(c);
 }
 
 pub unsafe fn send_if_some(conn: *mut DBusConnection, msg: Option<DbusMsg>) {

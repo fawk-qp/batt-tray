@@ -179,8 +179,12 @@ int main(int argc, char** argv) {
         for (DBusConnection* c : allConns) {
             int fd = -1;
             if (c && dbus_connection_get_unix_fd(c, &fd) && fd >= 0) {
+                short ev = POLLIN;
+                if (dbus_connection_has_messages_to_send(c)) {
+                    ev |= POLLOUT;
+                }
                 fds[nfds].fd = fd;
-                fds[nfds].events = POLLIN;
+                fds[nfds].events = ev;
                 ++nfds;
             }
         }

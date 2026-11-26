@@ -288,12 +288,21 @@ pub fn razer_calc_crc(buf: &[u8; 91]) -> u8 {
     crc
 }
 
-pub fn parse_razer_battery_response(resp: &[u8; 91]) -> Option<i32> {
-    if resp[1] != 0x02 || resp[7] != 0x07 || resp[8] != 0x80 || resp[89] != razer_calc_crc(resp) {
+pub fn parse_razer_battery_response(resp: &[u8; 91], expected_tx_id: u8) -> Option<i32> {
+    if resp[1] != 0x02
+        || resp[2] != expected_tx_id
+        || resp[7] != 0x07
+        || resp[8] != 0x80
+        || resp[89] != razer_calc_crc(resp)
+    {
         return None;
     }
     let pct = ((resp[10] as i32) * 100 + 127) / 255;
     if (0..=100).contains(&pct) { Some(pct) } else { None }
+}
+
+pub fn parse_hidpp_ping_response(resp: &[u8]) -> bool {
+    resp.len() >= 20 && resp[6] == 0xAA && resp[4] >= 2
 }
 
 pub fn build_compx_battery_request() -> [u8; 17] {
@@ -427,10 +436,24 @@ unsafe fn query_hidpp_device_info(
 
 #[derive(Clone)]
 struct HidppCacheEntry {
+    pinged: bool,
     bat_feat_id: u16,
     bat_feat_idx: u8,
     name: String,
     kind: DeviceKind,
+}
+
+unsafe fn hidpp_ping(
+    h: HANDLE,
+    out_cap: usize,
+    in_cap: usize,
+    dev_idx: u8,
+) -> bool {
+    let params = [0x00u8, 0x00u8, 0xAAu8];
+    match hidpp_call(h, out_cap, in_cap, dev_idx, 0x00, 0x01, &params) {
+        Ok(resp) => parse_hidpp_ping_response(&resp),
+        Err(_) => false,
+    }
 }
 
 fn hidpp_cache() -> &'static Mutex<HashMap<String, HidppCacheEntry>> {
@@ -470,7 +493,7 @@ unsafe fn probe_logitech_hidpp(
         let cache_key = format!("{}#{}", path_key.to_lowercase(), dev_idx);
         let cached = hidpp_cache().lock().ok().and_then(|g| g.get(&cache_key).cloned());
 
-        if let Some(c) = cached {
+        if let Some(c) = cached.filter(|e| e.pinged) {
             let func_id = if c.bat_feat_id == 0x1004 { 0x01 } else { 0x00 };
             if let Ok(resp) = hidpp_call(h.0, out_cap, in_cap, dev_idx, c.bat_feat_idx, func_id, &[]) {
                 if let Some((pct, charging)) = parse_hidpp_battery_response(c.bat_feat_id, &resp) {
@@ -502,6 +525,10 @@ unsafe fn probe_logitech_hidpp(
             if let Ok(mut g) = hidpp_cache().lock() {
                 g.remove(&cache_key);
             }
+            continue;
+        }
+
+        if !hidpp_ping(h.0, out_cap, in_cap, dev_idx) {
             continue;
         }
 
@@ -558,6 +585,7 @@ unsafe fn probe_logitech_hidpp(
             g.insert(
                 cache_key,
                 HidppCacheEntry {
+                    pinged: true,
                     bat_feat_id,
                     bat_feat_idx,
                     name: dev_name.clone(),
@@ -604,7 +632,11 @@ unsafe fn razer_feature_query(h: HANDLE, tx_id: u8, cmd_id: u8, resp: &mut [u8; 
     if HidD_GetFeature(h, resp.as_mut_ptr() as *mut c_void, resp.len() as u32) == 0 {
         return false;
     }
-    resp[1] == 0x02 && resp[7] == 0x07 && resp[8] == cmd_id && resp[89] == razer_calc_crc(resp)
+    resp[1] == 0x02
+        && resp[2] == tx_id
+        && resp[7] == 0x07
+        && resp[8] == cmd_id
+        && resp[89] == razer_calc_crc(resp)
 }
 
 unsafe fn probe_razer_device(out: &mut [DeviceState; 3], h: HANDLE, spec: RazerPidSpec) {
@@ -612,7 +644,7 @@ unsafe fn probe_razer_device(out: &mut [DeviceState; 3], h: HANDLE, spec: RazerP
     if !razer_feature_query(h, spec.tx_id, 0x80, &mut resp) {
         return;
     }
-    let Some(pct) = parse_razer_battery_response(&resp) else {
+    let Some(pct) = parse_razer_battery_response(&resp, spec.tx_id) else {
         return;
     };
     let mut ch_resp = [0u8; 91];
@@ -787,6 +819,7 @@ pub unsafe fn scan_vendor_hid_devices(out: &mut [DeviceState; 3]) {
 
         if attrs.VendorID == VID_LOGITECH
             && caps.UsagePage == 0xFF00
+            && (caps.Usage == 0x0001 || caps.Usage == 0x0002)
             && caps.InputReportByteLength >= 20
             && caps.OutputReportByteLength >= 20
         {
@@ -862,7 +895,23 @@ mod tests {
     }
 
     #[test]
-    fn razer_crc_and_percent() {
+    fn hidpp_ping_validation() {
+        let mut resp = [0u8; 20];
+        resp[4] = 4;
+        resp[5] = 2;
+        resp[6] = 0xAA;
+        assert!(parse_hidpp_ping_response(&resp));
+
+        resp[4] = 1;
+        assert!(!parse_hidpp_ping_response(&resp));
+
+        resp[4] = 4;
+        resp[6] = 0x55;
+        assert!(!parse_hidpp_ping_response(&resp));
+    }
+
+    #[test]
+    fn razer_crc_txid_and_percent() {
         let mut resp = [0u8; 91];
         resp[1] = 0x02;
         resp[2] = 0x1F;
@@ -871,14 +920,15 @@ mod tests {
         resp[8] = 0x80;
         resp[10] = 255;
         resp[89] = razer_calc_crc(&resp);
-        assert_eq!(parse_razer_battery_response(&resp), Some(100));
+        assert_eq!(parse_razer_battery_response(&resp, 0x1F), Some(100));
+        assert_eq!(parse_razer_battery_response(&resp, 0x3F), None);
 
         resp[10] = 128;
         resp[89] = razer_calc_crc(&resp);
-        assert_eq!(parse_razer_battery_response(&resp), Some(50));
+        assert_eq!(parse_razer_battery_response(&resp, 0x1F), Some(50));
 
         resp[89] ^= 0x01;
-        assert_eq!(parse_razer_battery_response(&resp), None);
+        assert_eq!(parse_razer_battery_response(&resp, 0x1F), None);
     }
 
     #[test]

@@ -2,7 +2,9 @@ use crate::dbus_ffi::{
     cstr, getpid, getuid, openat, renameat, unlinkat, O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL,
     O_NOFOLLOW, O_NONBLOCK, O_WRONLY,
 };
-use crate::device::{sanitize_device_text, DeviceEntry, DeviceKind, DeviceState};
+use crate::device::{
+    sanitize_device_text, strip_battery_detail_suffix, DeviceEntry, DeviceKind, DeviceState,
+};
 use std::ffi::c_char;
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{Read, Write};
@@ -39,12 +41,14 @@ fn now_unix_sec() -> i64 {
 }
 
 fn matches_active(item: &HistoryItem, active_items: &[DeviceEntry]) -> bool {
-    let item_low = item.name.to_lowercase();
+    let item_low = strip_battery_detail_suffix(&item.name).to_lowercase();
     for act in active_items {
-        if !item.key.is_empty() && item.key == act.key {
+        let act_base = strip_battery_detail_suffix(&act.name);
+        let act_key = act_base.to_lowercase();
+        if !item.key.is_empty() && (item.key == act.key || (!act_key.is_empty() && item.key == act_key)) {
             return true;
         }
-        if !item_low.is_empty() && item_low == act.name.to_lowercase() {
+        if !item_low.is_empty() && item_low == act_key {
             return true;
         }
     }
@@ -278,20 +282,28 @@ impl DeviceHistory {
                 _ => DeviceKind::Headphones,
             };
             for d in &slot.items {
-                if d.key.is_empty() || !(0..=100).contains(&d.percent) {
+                let base_name = strip_battery_detail_suffix(&d.name).to_string();
+                let base_key = if base_name.is_empty() {
+                    d.key.clone()
+                } else {
+                    base_name.to_lowercase()
+                };
+                if base_key.is_empty() || !(0..=100).contains(&d.percent) {
                     continue;
                 }
-                let norm_name = d.name.to_lowercase();
                 if let Some(existing) = self.items.iter_mut().find(|h| {
-                    h.kind == kind && (h.key == d.key || (!norm_name.is_empty() && h.name.to_lowercase() == norm_name))
+                    h.kind == kind
+                        && (h.key == base_key
+                            || (!base_name.is_empty()
+                                && strip_battery_detail_suffix(&h.name).to_lowercase() == base_key))
                 }) {
                     if existing.percent != d.percent
-                        || (!d.name.is_empty() && existing.name != d.name)
-                        || existing.key != d.key
+                        || (!base_name.is_empty() && existing.name != base_name)
+                        || existing.key != base_key
                     {
-                        existing.key = d.key.clone();
-                        if !d.name.is_empty() {
-                            existing.name = d.name.clone();
+                        existing.key = base_key;
+                        if !base_name.is_empty() {
+                            existing.name = base_name;
                         }
                         existing.percent = d.percent;
                         existing.last_seen_unix = now;
@@ -303,8 +315,8 @@ impl DeviceHistory {
                 } else {
                     self.items.push(HistoryItem {
                         kind,
-                        key: d.key.clone(),
-                        name: d.name.clone(),
+                        key: base_key,
+                        name: base_name,
                         percent: d.percent,
                         last_seen_unix: now,
                     });

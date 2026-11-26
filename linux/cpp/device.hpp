@@ -38,5 +38,6 @@ const std::array<SlotSpec, 3>& GetSlotSpecs();
 std::string ToLower(std::string s);
 std::string Trim(std::string s);
 std::string SanitizeDeviceText(const std::string& s, size_t maxChars = 64);
+std::string StripBatteryDetailSuffix(const std::string& s);
 DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint = "", uint32_t cod = 0);
 void StoreCandidate(std::array<DeviceState, 3>& out, DeviceKind kind, const std::string& name, int percent, bool charging);

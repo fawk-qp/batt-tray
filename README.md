@@ -41,7 +41,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now batt-tray
 ```
 
-Flags: `--hide-offline` marks disconnected devices as passive instead of dropping them, `--no-notify` disables low-battery desktop notifications, `--airpods-ble` enables un-paired Apple Continuity BLE battery beacons on Linux, `--demo` runs on synthetic data without touching hardware or D-Bus.
+Flags: `--hide-offline` marks disconnected devices as passive instead of dropping them, `--no-notify` disables low-battery desktop notifications, `--airpods-ble` opts in to unpaired Apple Continuity BLE battery beacons on Linux, `--demo` runs on synthetic data without touching hardware or D-Bus.
 
 ## Releases
 

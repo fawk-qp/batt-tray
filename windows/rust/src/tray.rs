@@ -182,7 +182,7 @@ impl TrayManager {
         let vis = compute_slot_visibility(online, self.hide_offline, self.anchor_slot);
         self.anchor_slot = vis.anchor_slot;
         for i in 0..3 {
-            if !self.added_in_tray[i] {
+            if !vis.visible[i] {
                 continue;
             }
             let tip = if vis.anchor_mode && i == vis.anchor_slot {
@@ -506,8 +506,19 @@ impl TrayManager {
 
         unsafe {
             let cmd = if add { NIM_ADD } else { NIM_MODIFY };
-            if Shell_NotifyIconW(cmd, &mut nid) == 0 && !add {
-                Shell_NotifyIconW(NIM_ADD, &mut nid);
+            let mut ok = Shell_NotifyIconW(cmd, &mut nid) != 0;
+            if !ok && !add {
+                ok = Shell_NotifyIconW(NIM_ADD, &mut nid) != 0;
+            }
+            if !ok {
+                DestroyIcon(next_icon);
+                self.added_in_tray[idx] = false;
+                if !self.icons[idx].is_null() {
+                    DestroyIcon(self.icons[idx]);
+                    self.icons[idx] = null_mut();
+                }
+                self.cache[idx] = SlotCache::default();
+                return;
             }
             self.added_in_tray[idx] = true;
             if !self.icons[idx].is_null() {

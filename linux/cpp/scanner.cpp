@@ -113,7 +113,8 @@ int NibbleToPercent(uint8_t nib) {
 }
 
 bool ParseAppleContinuityAirPods(const std::vector<uint8_t>& data, AirpodsReading& out) {
-    if (data.size() < 9 || data[0] != 0x07 || data[1] < 0x19 || data[2] != 0x01) {
+    if (data.size() < 2 || data[0] != 0x07 || data[1] < 0x19 ||
+        data.size() < static_cast<size_t>(data[1]) + 2 || data[2] != 0x01) {
         return false;
     }
     const uint16_t model = (static_cast<uint16_t>(data[3]) << 8) | data[4];
@@ -323,10 +324,11 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out, bool allowA
     struct AirpodsCandidate {
         AirpodsReading reading;
         int16_t rssi = -127;
+        bool paired = false;
         bool connected = false;
     };
-    bool hasConnectedAppleAudioWithoutBat = false;
-    std::vector<AirpodsCandidate> airpodsCandidates;
+    std::vector<AirpodsCandidate> pairedCandidates;
+    std::vector<AirpodsCandidate> unpairedCandidates;
 
     DBusMessageIter objs;
     dbus_message_iter_recurse(&it, &objs);
@@ -335,7 +337,7 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out, bool allowA
         dbus_message_iter_recurse(&objs, &oe);
         if (dbus_message_iter_next(&oe) && dbus_message_iter_get_arg_type(&oe) == DBUS_TYPE_ARRAY) {
             dbus_message_iter_recurse(&oe, &ifaces);
-            bool connected = false, hasBat = false, hasRssi = false;
+            bool connected = false, paired = false, hasBat = false, hasRssi = false;
             uint8_t batPct = 0;
             uint32_t cod = 0;
             int16_t rssi = -127;
@@ -372,6 +374,10 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out, bool allowA
                                 dbus_bool_t b = 0;
                                 dbus_message_iter_get_basic(&pv, &b);
                                 connected = (b != 0);
+                            } else if (isDev && std::strcmp(pk, "Paired") == 0 && pt == DBUS_TYPE_BOOLEAN) {
+                                dbus_bool_t b = 0;
+                                dbus_message_iter_get_basic(&pv, &b);
+                                paired = (b != 0);
                             } else if (isDev && std::strcmp(pk, "Name") == 0 && pt == DBUS_TYPE_STRING) {
                                 const char* s = nullptr;
                                 dbus_message_iter_get_basic(&pv, &s);
@@ -396,36 +402,35 @@ void ScanBlueZ(DBusConnection* sys, std::array<DeviceState, 3>& out, bool allowA
             }
             if (connected && hasBat && batPct <= 100) {
                 StoreCandidate(out, ClassifyDevice(name, icon, cod), name, batPct, false);
-            } else if (connected && !hasBat) {
-                const std::string lowName = ToLower(name);
-                const bool isAppleAudioName =
-                    lowName.find("airpods") != std::string::npos ||
-                    lowName.find("beats") != std::string::npos ||
-                    lowName.find("apple") != std::string::npos;
-                if (ClassifyDevice(name, icon, cod) == DeviceKind::Headphones || isAppleAudioName) {
-                    hasConnectedAppleAudioWithoutBat = true;
-                }
             }
-            if (!appleData.empty() && (connected || (hasRssi && rssi >= -65))) {
+            if (!appleData.empty()) {
                 AirpodsReading reading{};
-                if (ParseAppleContinuityAirPods(appleData, reading)) {
-                    airpodsCandidates.push_back({std::move(reading), hasRssi ? rssi : static_cast<int16_t>(0), connected});
+                if (paired && connected && ParseAppleContinuityAirPods(appleData, reading)) {
+                    pairedCandidates.push_back({std::move(reading), hasRssi ? rssi : static_cast<int16_t>(0), true, true});
+                } else if (!paired && allowAirpodsBle && hasRssi && rssi >= -65 &&
+                           ParseAppleContinuityAirPods(appleData, reading)) {
+                    unpairedCandidates.push_back({std::move(reading), rssi, false, connected});
                 }
             }
         }
         dbus_message_iter_next(&objs);
     }
 
-    if ((hasConnectedAppleAudioWithoutBat || allowAirpodsBle) && !airpodsCandidates.empty()) {
-        const AirpodsCandidate* best = &airpodsCandidates[0];
-        for (size_t i = 1; i < airpodsCandidates.size(); ++i) {
-            const auto& c = airpodsCandidates[i];
-            if ((c.connected && !best->connected) || (c.connected == best->connected && c.rssi > best->rssi)) {
-                best = &c;
-            }
+    const AirpodsCandidate* chosen = nullptr;
+    if (!pairedCandidates.empty()) {
+        chosen = &pairedCandidates[0];
+        for (size_t i = 1; i < pairedCandidates.size(); ++i) {
+            if (pairedCandidates[i].rssi > chosen->rssi) chosen = &pairedCandidates[i];
         }
-        StoreCandidate(out, DeviceKind::Headphones, best->reading.displayName,
-                       best->reading.percent, best->reading.charging);
+    } else if (allowAirpodsBle && !unpairedCandidates.empty()) {
+        chosen = &unpairedCandidates[0];
+        for (size_t i = 1; i < unpairedCandidates.size(); ++i) {
+            if (unpairedCandidates[i].rssi > chosen->rssi) chosen = &unpairedCandidates[i];
+        }
+    }
+    if (chosen) {
+        StoreCandidate(out, DeviceKind::Headphones, chosen->reading.displayName,
+                       chosen->reading.percent, chosen->reading.charging);
     }
 }
 

@@ -161,7 +161,12 @@ fn nibble_to_percent(nib: u8) -> i32 {
 }
 
 pub fn parse_apple_continuity_airpods(data: &[u8]) -> Option<AirpodsReading> {
-    if data.len() < 9 || data[0] != 0x07 || data[1] < 0x19 || data[2] != 0x01 {
+    if data.len() < 2
+        || data[0] != 0x07
+        || data[1] < 0x19
+        || data.len() < (data[1] as usize) + 2
+        || data[2] != 0x01
+    {
         return None;
     }
     let model = ((data[3] as u16) << 8) | (data[4] as u16);
@@ -275,10 +280,9 @@ unsafe fn scan_bluez(sys: *mut DBusConnection, out: &mut [DeviceState; 3], allow
     struct AirpodsCandidate {
         reading: AirpodsReading,
         rssi: i16,
-        connected: bool,
     }
-    let mut has_connected_apple_audio_without_bat = false;
-    let mut airpods_candidates: Vec<AirpodsCandidate> = Vec::new();
+    let mut paired_candidates: Vec<AirpodsCandidate> = Vec::new();
+    let mut unpaired_candidates: Vec<AirpodsCandidate> = Vec::new();
 
     let mut objs = zero_iter();
     dbus_message_iter_recurse(&mut it, &mut objs);
@@ -288,7 +292,7 @@ unsafe fn scan_bluez(sys: *mut DBusConnection, out: &mut [DeviceState; 3], allow
         if dbus_message_iter_next(&mut oe) != 0 && dbus_message_iter_get_arg_type(&mut oe) == DBUS_TYPE_ARRAY {
             let mut ifaces = zero_iter();
             dbus_message_iter_recurse(&mut oe, &mut ifaces);
-            let (mut connected, mut has_bat, mut has_rssi) = (false, false, false);
+            let (mut connected, mut paired, mut has_bat, mut has_rssi) = (false, false, false, false);
             let (mut pct, mut cod, mut rssi) = (0u8, 0u32, -127i16);
             let (mut name, mut icon) = (String::new(), String::new());
             let mut apple_data: Vec<u8> = Vec::new();
@@ -325,6 +329,11 @@ unsafe fn scan_bluez(sys: *mut DBusConnection, out: &mut [DeviceState; 3], allow
                                             dbus_message_iter_get_basic(&mut pv, &mut b as *mut u32 as *mut c_void);
                                             connected = b != 0;
                                         }
+                                        (true, _, "Paired", DBUS_TYPE_BOOLEAN) => {
+                                            let mut b = 0u32;
+                                            dbus_message_iter_get_basic(&mut pv, &mut b as *mut u32 as *mut c_void);
+                                            paired = b != 0;
+                                        }
                                         (true, _, "Name", DBUS_TYPE_STRING) => if let Some(s) = iter_read_str(&mut pv) { name = s; },
                                         (true, _, "Icon", DBUS_TYPE_STRING) => if let Some(s) = iter_read_str(&mut pv) { icon = s; },
                                         (true, _, "Class", DBUS_TYPE_UINT32) => dbus_message_iter_get_basic(&mut pv, &mut cod as *mut u32 as *mut c_void),
@@ -348,36 +357,40 @@ unsafe fn scan_bluez(sys: *mut DBusConnection, out: &mut [DeviceState; 3], allow
             if connected && has_bat && pct <= 100 {
                 let kind = classify_device(&name, &icon, cod);
                 store_candidate(out, kind, name, pct as i32, false);
-            } else if connected && !has_bat {
-                let low = name.to_lowercase();
-                let is_apple_audio = low.contains("airpods") || low.contains("beats") || low.contains("apple");
-                if classify_device(&name, &icon, cod) == DeviceKind::Headphones || is_apple_audio {
-                    has_connected_apple_audio_without_bat = true;
-                }
             }
-            if !apple_data.is_empty() && (connected || (has_rssi && rssi >= -65)) {
-                if let Some(reading) = parse_apple_continuity_airpods(&apple_data) {
-                    airpods_candidates.push(AirpodsCandidate {
-                        reading,
-                        rssi: if has_rssi { rssi } else { 0 },
-                        connected,
-                    });
+            if !apple_data.is_empty() {
+                if paired && connected {
+                    if let Some(reading) = parse_apple_continuity_airpods(&apple_data) {
+                        paired_candidates.push(AirpodsCandidate {
+                            reading,
+                            rssi: if has_rssi { rssi } else { 0 },
+                        });
+                    }
+                } else if !paired && allow_airpods_ble && has_rssi && rssi >= -65 {
+                    if let Some(reading) = parse_apple_continuity_airpods(&apple_data) {
+                        unpaired_candidates.push(AirpodsCandidate { reading, rssi });
+                    }
                 }
             }
         }
         dbus_message_iter_next(&mut objs);
     }
 
-    if (has_connected_apple_audio_without_bat || allow_airpods_ble) && !airpods_candidates.is_empty() {
-        if let Some(best) = airpods_candidates.into_iter().max_by_key(|c| (c.connected, c.rssi)) {
-            store_candidate(
-                out,
-                DeviceKind::Headphones,
-                best.reading.display_name,
-                best.reading.percent,
-                best.reading.charging,
-            );
-        }
+    let chosen = if !paired_candidates.is_empty() {
+        paired_candidates.into_iter().max_by_key(|c| c.rssi)
+    } else if allow_airpods_ble && !unpaired_candidates.is_empty() {
+        unpaired_candidates.into_iter().max_by_key(|c| c.rssi)
+    } else {
+        None
+    };
+    if let Some(best) = chosen {
+        store_candidate(
+            out,
+            DeviceKind::Headphones,
+            best.reading.display_name,
+            best.reading.percent,
+            best.reading.charging,
+        );
     }
 }
 
@@ -464,14 +477,16 @@ mod tests {
     #[test]
     fn apple_continuity_airpods_pro_and_flip() {
         // Model 0x1420 (AirPods Pro 2), not flipped: nib_a=8 (L=80%), nib_b=9 (R=90%), case=6 (C=60%), charging L=1
-        let pkt = [0x07, 0x19, 0x01, 0x14, 0x20, 0x00, 0x89, 0x16, 0x00];
+        let mut pkt = [0u8; 27];
+        pkt[..9].copy_from_slice(&[0x07, 0x19, 0x01, 0x14, 0x20, 0x00, 0x89, 0x16, 0x00]);
         let r = parse_apple_continuity_airpods(&pkt).unwrap();
         assert_eq!(r.percent, 80);
         assert!(r.charging);
         assert_eq!(r.display_name, "AirPods Pro 2 (L:80% R:90% C:60%)");
 
         // Flipped (data[5] & 0x20): nib_a=3 (now R=30%), nib_b=7 (now L=70%), chg_b=1 (now L charging)
-        let pkt_flip = [0x07, 0x19, 0x01, 0x14, 0x20, 0x20, 0x37, 0x2F, 0x00];
+        let mut pkt_flip = [0u8; 27];
+        pkt_flip[..9].copy_from_slice(&[0x07, 0x19, 0x01, 0x14, 0x20, 0x20, 0x37, 0x2F, 0x00]);
         let rf = parse_apple_continuity_airpods(&pkt_flip).unwrap();
         assert_eq!(rf.percent, 30);
         assert!(rf.charging);
@@ -480,15 +495,24 @@ mod tests {
 
     #[test]
     fn apple_continuity_airpods_max_and_invalid() {
-        let pkt_max = [0x07, 0x19, 0x01, 0x0A, 0x20, 0x00, 0x6F, 0x0F, 0x00];
+        let mut pkt_max = [0u8; 27];
+        pkt_max[..9].copy_from_slice(&[0x07, 0x19, 0x01, 0x0A, 0x20, 0x00, 0x6F, 0x0F, 0x00]);
         let rm = parse_apple_continuity_airpods(&pkt_max).unwrap();
         assert_eq!(rm.percent, 60);
         assert!(!rm.charging);
         assert_eq!(rm.display_name, "AirPods Max (60%)");
 
-        // Unknown model or short/wrong header rejected
-        assert!(parse_apple_continuity_airpods(&[0x07, 0x19, 0x01, 0x99, 0x99, 0x00, 0x55, 0x05, 0x00]).is_none());
-        assert!(parse_apple_continuity_airpods(&[0x07, 0x19, 0x02, 0x14, 0x20, 0x00, 0x55, 0x05, 0x00]).is_none());
+        // Truncated 9-byte packet with data[1] == 0x19 must be rejected
+        assert!(parse_apple_continuity_airpods(&[0x07, 0x19, 0x01, 0x14, 0x20, 0x00, 0x89, 0x16, 0x00]).is_none());
+
+        // Unknown model or wrong header rejected
+        let mut bad_model = [0u8; 27];
+        bad_model[..9].copy_from_slice(&[0x07, 0x19, 0x01, 0x99, 0x99, 0x00, 0x55, 0x05, 0x00]);
+        assert!(parse_apple_continuity_airpods(&bad_model).is_none());
+
+        let mut bad_mode = [0u8; 27];
+        bad_mode[..9].copy_from_slice(&[0x07, 0x19, 0x02, 0x14, 0x20, 0x00, 0x55, 0x05, 0x00]);
+        assert!(parse_apple_continuity_airpods(&bad_mode).is_none());
         assert!(parse_apple_continuity_airpods(&[0x07, 0x19, 0x01, 0x14, 0x20]).is_none());
     }
 }

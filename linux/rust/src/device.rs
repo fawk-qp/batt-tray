@@ -52,6 +52,15 @@ pub fn sanitize_device_text(raw: &str, max_chars: usize) -> String {
         .to_string()
 }
 
+pub fn strip_battery_detail_suffix(name: &str) -> &str {
+    if name.ends_with("%)") {
+        if let Some(pos) = name.rfind(" (") {
+            return &name[..pos];
+        }
+    }
+    name
+}
+
 pub fn classify_device(name: &str, icon_hint: &str, cod: u32) -> DeviceKind {
     if cod != 0 {
         let major = (cod >> 8) & 0x1F;

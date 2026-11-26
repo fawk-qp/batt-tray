@@ -121,7 +121,7 @@ void TrayManager::ReaddIcons() {
     const auto& specs = GetSlotSpecs();
     bool anyRendered = false;
     for (size_t i = 0; i < 3; ++i) {
-        if (!addedInTray_[i]) continue;
+        if (!vis.visible[i]) continue;
         const std::wstring tip = (vis.anchorMode && static_cast<int>(i) == vis.anchorSlot)
             ? std::wstring(kAnchorTooltip)
             : FormatTooltip(specs[i], states_[i]);
@@ -262,8 +262,19 @@ void TrayManager::ApplySlot(size_t idx, bool add, int iconSize, const std::wstri
     nid.hIcon = nextIcon;
     wcsncpy_s(nid.szTip, _countof(nid.szTip), tip.c_str(), _TRUNCATE);
 
-    if (!Shell_NotifyIconW(add ? NIM_ADD : NIM_MODIFY, &nid) && !add) {
-        Shell_NotifyIconW(NIM_ADD, &nid);
+    BOOL ok = Shell_NotifyIconW(add ? NIM_ADD : NIM_MODIFY, &nid);
+    if (!ok && !add) {
+        ok = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
+    if (!ok) {
+        DestroyIcon(nextIcon);
+        addedInTray_[idx] = false;
+        if (icons_[idx]) {
+            DestroyIcon(icons_[idx]);
+            icons_[idx] = nullptr;
+        }
+        cache_[idx] = SlotCache{};
+        return;
     }
     addedInTray_[idx] = true;
 

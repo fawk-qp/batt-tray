@@ -552,7 +552,6 @@ void SendDesktopNotification(DBusConnection* conn, const std::string& name, int 
     dbus_message_iter_append_basic(&it, DBUS_TYPE_INT32, &expireMs);
 
     dbus_connection_send(conn, msg.p, nullptr);
-    dbus_connection_flush(conn);
 }
 
 } // namespace
@@ -572,7 +571,6 @@ void DrainDbusConn(DBusConnection* conn) {
     if (!conn) return;
     dbus_connection_read_write(conn, 0);
     while (dbus_connection_dispatch(conn) == DBUS_DISPATCH_DATA_REMAINS) {}
-    dbus_connection_flush(conn);
 }
 
 SniManager::~SniManager() {
@@ -642,7 +640,14 @@ std::vector<InactiveMenuRow> SniManager::BuildInactiveMenu(size_t slotIdx) const
 
 void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
     states_ = states;
-    history_.SyncActive(states_);
+    std::array<DeviceState, 3> histStates = states_;
+    for (auto& st : histStates) {
+        for (auto& d : st.items) {
+            d.name = StripBatteryDetailSuffix(d.name);
+            if (!d.name.empty()) d.key = ToLower(d.name);
+        }
+    }
+    history_.SyncActive(histStates);
     for (size_t i = 0; i < 3; ++i) {
         UpdateSlot(slots_[i], states_[i]);
     }
@@ -653,12 +658,7 @@ void SniManager::UpdateAll(const std::array<DeviceState, 3>& states) {
         for (size_t i = 0; i < 3; ++i) {
             if (!states_[i].online) continue;
             for (const auto& d : states_[i].items) {
-                std::string devName = d.name.empty() ? std::string(slots_[i].spec->label) : d.name;
-                const size_t paren = devName.rfind(" (");
-                if (paren != std::string::npos && devName.size() >= 2 &&
-                    devName.compare(devName.size() - 2, 2, "%)") == 0) {
-                    devName.resize(paren);
-                }
+                const std::string devName = d.name.empty() ? std::string(slots_[i].spec->label) : StripBatteryDetailSuffix(d.name);
                 const AlertLevel lvl = alertTracker_.Evaluate(static_cast<int>(i), devName, d.percent, d.charging, nowSec);
                 if (lvl == AlertLevel::None) continue;
                 SendDesktopNotification(slots_[i].conn, devName, d.percent, lvl == AlertLevel::Critical5);

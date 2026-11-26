@@ -190,7 +190,11 @@ fn main() {
             for &c in &conns {
                 let mut fd = -1;
                 if !c.is_null() && dbus_connection_get_unix_fd(c, &mut fd) != 0 && fd >= 0 {
-                    fds[nfds] = PollFd { fd, events: POLLIN, revents: 0 };
+                    let mut events = POLLIN;
+                    if dbus_connection_has_messages_to_send(c) != 0 {
+                        events |= POLLOUT;
+                    }
+                    fds[nfds] = PollFd { fd, events, revents: 0 };
                     nfds += 1;
                 }
             }

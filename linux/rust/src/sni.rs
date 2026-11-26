@@ -1,6 +1,6 @@
 use crate::alert_tracker::{AlertLevel, AlertTracker};
 use crate::dbus_ffi::*;
-use crate::device::{DeviceKind, DeviceState, SLOT_SPECS};
+use crate::device::{strip_battery_detail_suffix, DeviceKind, DeviceState, SLOT_SPECS};
 use crate::history::DeviceHistory;
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void};
@@ -660,7 +660,6 @@ unsafe fn send_desktop_notification(conn: *mut DBusConnection, name: &str, perce
     dbus_message_iter_append_basic(&mut it, DBUS_TYPE_INT32, &expire_ms as *const i32 as *const c_void);
 
     dbus_connection_send(conn, msg.0, null_mut());
-    dbus_connection_flush(conn);
 }
 
 unsafe fn register_watcher(conn: *mut DBusConnection, bus_name: &str) {
@@ -868,7 +867,17 @@ pub unsafe fn init_slots(hide_offline: bool, demo_mode: bool, notify_enabled: bo
 
 pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
     STATES.with(|st| *st.borrow_mut() = found.clone());
-    HISTORY.with(|h| h.borrow_mut().sync_active(found));
+    let mut hist_states = found.clone();
+    for st in &mut hist_states {
+        for d in &mut st.items {
+            let base = strip_battery_detail_suffix(&d.name).to_string();
+            if !base.is_empty() {
+                d.key = base.to_lowercase();
+            }
+            d.name = base;
+        }
+    }
+    HISTORY.with(|h| h.borrow_mut().sync_active(&hist_states));
 
     let updates: Vec<SlotEmit> = SLOTS.with(|s| {
         let mut slots = s.borrow_mut();
@@ -915,15 +924,10 @@ pub unsafe fn update_all_slots(found: &[DeviceState; 3]) {
                 continue;
             }
             for d in &slot_state.items {
-                let raw_name = if d.name.is_empty() {
+                let alert_name = if d.name.is_empty() {
                     SLOT_SPECS[i].label
                 } else {
-                    &d.name
-                };
-                let alert_name = if raw_name.ends_with("%)") {
-                    raw_name.rfind(" (").map(|p| &raw_name[..p]).unwrap_or(raw_name)
-                } else {
-                    raw_name
+                    strip_battery_detail_suffix(&d.name)
                 };
                 let lvl = tracker.evaluate(i, alert_name, d.percent, d.charging, now_sec);
                 if lvl != AlertLevel::None {

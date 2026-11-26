@@ -106,6 +106,15 @@ std::string SanitizeDeviceText(const std::string& s, size_t maxChars) {
     return Trim(std::move(out));
 }
 
+std::string StripBatteryDetailSuffix(const std::string& s) {
+    const size_t paren = s.rfind(" (");
+    if (paren != std::string::npos && s.size() >= 2 &&
+        s.compare(s.size() - 2, 2, "%)") == 0) {
+        return s.substr(0, paren);
+    }
+    return s;
+}
+
 DeviceKind ClassifyDevice(const std::string& name, const std::string& iconHint, uint32_t cod) {
     if (cod != 0) {
         const uint32_t major = (cod >> 8) & 0x1Fu;

@@ -354,7 +354,17 @@ void QueryHidppDeviceInfo(HANDLE h, size_t outCap, size_t inCap, uint8_t devIdx,
     }
 }
 
+bool HidppPing(HANDLE h, size_t outCap, size_t inCap, uint8_t devIdx, bool& isProtocolError) {
+    uint8_t params[3] = {0x00, 0x00, 0xAA};
+    std::vector<uint8_t> resp;
+    if (!HidppCall(h, outCap, inCap, devIdx, 0x00, 0x01, params, 3, resp, isProtocolError)) {
+        return false;
+    }
+    return resp.size() >= 20 && resp[6] == 0xAA && resp[4] >= 2;
+}
+
 struct HidppCacheEntry {
+    bool pinged = false;
     uint16_t batFeatId = 0;
     uint8_t batFeatIdx = 0;
     std::wstring name;
@@ -401,7 +411,7 @@ void ProbeLogitechHidpp(std::array<DeviceState, 3>& out, const std::wstring& pat
         bool charging = false;
         bool protoErr = false;
 
-        if (hasCached) {
+        if (hasCached && cached.pinged) {
             if (QueryHidppBattery(h.h, outCap, inCap, devIdx, cached.batFeatId, cached.batFeatIdx,
                                   pct, charging, protoErr)) {
                 DeviceEntry entry{};
@@ -417,6 +427,10 @@ void ProbeLogitechHidpp(std::array<DeviceState, 3>& out, const std::wstring& pat
             }
             std::lock_guard<std::mutex> lk(g_hidppCacheMtx);
             g_hidppCache.erase(cacheKey);
+            continue;
+        }
+
+        if (!HidppPing(h.h, outCap, inCap, devIdx, protoErr)) {
             continue;
         }
 
@@ -450,7 +464,7 @@ void ProbeLogitechHidpp(std::array<DeviceState, 3>& out, const std::wstring& pat
         {
             std::lock_guard<std::mutex> lk(g_hidppCacheMtx);
             if (g_hidppCache.size() >= 64) g_hidppCache.clear();
-            g_hidppCache[cacheKey] = {foundFeatId, foundFeatIdx, devName, devKind};
+            g_hidppCache[cacheKey] = {true, foundFeatId, foundFeatIdx, devName, devKind};
         }
 
         DeviceEntry entry{};
@@ -487,7 +501,7 @@ bool RazerFeatureQuery(HANDLE h, uint8_t txId, uint8_t cmdId, uint8_t* resp) {
     resp[0] = 0x00;
     if (!HidD_GetFeature(h, resp, 91)) return false;
 
-    return resp[1] == 0x02 && resp[7] == 0x07 && resp[8] == cmdId && resp[89] == RazerCalcCrc(resp);
+    return resp[1] == 0x02 && resp[2] == txId && resp[7] == 0x07 && resp[8] == cmdId && resp[89] == RazerCalcCrc(resp);
 }
 
 void ProbeRazerDevice(std::array<DeviceState, 3>& out, HANDLE h, const RazerPidSpec& spec) {
@@ -586,6 +600,7 @@ void ScanVendorHidDevices(std::array<DeviceState, 3>& out) {
         if (HidP_GetCaps(ppd.ppd, &caps) != HIDP_STATUS_SUCCESS) continue;
 
         if (attrs.VendorID == kVidLogitech && caps.UsagePage == 0xFF00 &&
+            (caps.Usage == 0x0001 || caps.Usage == 0x0002) &&
             caps.InputReportByteLength >= 20 && caps.OutputReportByteLength >= 20) {
             ProbeLogitechHidpp(out, detail->DevicePath, attrs.ProductID,
                                caps.OutputReportByteLength, caps.InputReportByteLength);
