@@ -729,7 +729,7 @@ pub unsafe fn scan_vendor_hid_devices(out: &mut [DeviceState; 3]) {
         idx += 1;
 
         let mut req_size = 0u32;
-        SetupDiGetDeviceInterfaceDetailW(set.0, &if_data, null_mut(), 0, &mut req_size, null_mut());
+        SetupDiGetDeviceInterfaceDetailW(set.0, &mut if_data, null_mut(), 0, &mut req_size, null_mut());
         if (req_size as usize) < path_offset + 2 {
             continue;
         }
@@ -738,7 +738,7 @@ pub unsafe fn scan_vendor_hid_devices(out: &mut [DeviceState; 3]) {
         let detail_ptr = raw_detail.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
         (*detail_ptr).cbSize = detail_cb_size;
 
-        if SetupDiGetDeviceInterfaceDetailW(set.0, &if_data, detail_ptr, req_size, null_mut(), null_mut()) == 0 {
+        if SetupDiGetDeviceInterfaceDetailW(set.0, &mut if_data, detail_ptr, req_size, null_mut(), null_mut()) == 0 {
             continue;
         }
 
