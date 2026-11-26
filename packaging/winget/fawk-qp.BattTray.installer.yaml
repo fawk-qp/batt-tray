@@ -1,11 +1,11 @@
 PackageIdentifier: fawk-qp.BattTray
-PackageVersion: 1.3.0
+PackageVersion: 1.4.0
 InstallerType: portable
 Commands:
   - batt-tray
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/fawk-qp/batt-tray/releases/download/v1.3.0/batt-tray-win-rust.exe
-    InstallerSha256: 5B2EA18CB1822EB82CF340ADBEAD292E89149E01BCD07F6FEEB8945B0A073EE9
+    InstallerUrl: https://github.com/fawk-qp/batt-tray/releases/download/v1.4.0/batt-tray-win-rust.exe
+    InstallerSha256: FE5AE764B306EB2391496DA13F22AD7B4A42561B3140E83353107CB64250EEDE
 ManifestType: installer
 ManifestVersion: 1.6.0

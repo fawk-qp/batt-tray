@@ -1,5 +1,5 @@
 pkgname=batt-tray-bin
-pkgver=1.3.0
+pkgver=1.4.0
 pkgrel=1
 pkgdesc="Wireless peripherals battery tray indicator"
 arch=('x86_64')
@@ -12,7 +12,7 @@ source=(
     "batt-tray-${pkgver}-x86_64::https://github.com/fawk-qp/batt-tray/releases/download/v${pkgver}/batt-tray-linux-rust"
     "batt-tray-${pkgver}.service::https://raw.githubusercontent.com/fawk-qp/batt-tray/v${pkgver}/linux/batt-tray.service"
 )
-sha256sums=('f79fad3ea224a51adc4faec78b547514bc7d404a08a3cc54d1e41ef7734a2eae' 'SKIP')
+sha256sums=('4c616e2cd500caf31e5abddb2b6bea35fc9942cba7f58a16441e036376d420f5' 'SKIP')
 
 package() {
     install -Dm755 "${srcdir}/batt-tray-${pkgver}-x86_64" "${pkgdir}/usr/bin/batt-tray"
